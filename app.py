@@ -327,12 +327,10 @@ if cust_file and raw_file:
 
                 sheet_selections = []
                 for entry in available_to_select:
-                    # ค่าเริ่มต้น: ถ้าไม่หลุด Spec (is_ng == False) จะติ๊กเลือกให้อัตโนมัติ (True)
-                    # ถ้าหลุด Spec (is_ng == True) จะไม่ติ๊ก (False) เพื่อให้ผู้ใช้ดูและตัดสินใจติ๊กเอง
-                    default_checked = not entry["is_ng"]
+                    # ปรับค่าเริ่มต้นให้เป็น False (ไม่ติ๊กเลย) เพื่อให้ผู้ใช้ติ๊กเองทั้งหมด
                     checked = st.checkbox(
                         entry["label"],
-                        value=default_checked,
+                        value=False, 
                         key=f"chk_{sheet_name}_{entry['col']}"
                     )
                     if checked:
