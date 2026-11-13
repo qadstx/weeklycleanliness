@@ -394,7 +394,7 @@ if cust_file and raw_file:
             st.download_button(
                 label="📥 ดาวน์โหลดไฟล์ส่งลูกค้า (Updated Customer File)",
                 data=excel_data,
-                file_name=f"Updated_{cust_file.name}",
+                file_name=f"{cust_file.name}",
                 mime="application/vnd.ms-excel.sheet.macroEnabled.12" if is_xlsm else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
