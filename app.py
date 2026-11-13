@@ -348,7 +348,7 @@ if cust_file and raw_file:
         with st.spinner("กำลังคัดลอกข้อมูล รูปแบบตาราง และ Comment ลงในไฟล์ลูกค้า..."):
             cust_file.seek(0)
             raw_file.seek(0)
-            wb_cust_out = openpyxl.load_workbook(cust_file)
+            wb_cust_out = openpyxl.load_workbook(cust_file, keep_vba=True)
             wb_raw_src = openpyxl.load_workbook(raw_file)
 
             total_added = 0
