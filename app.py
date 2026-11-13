@@ -7,7 +7,7 @@ import datetime
 import re
 
 st.set_page_config(page_title="Customer Data Auto-Filler", layout="wide")
-st.title("📊 ระบบคัดกรองและเติมข้อมูลส่งลูกค้าอัตโนมัติ (พร้อมเช็ค Spec & WW)")
+st.title("📊 ระบบคัดกรองและเติมข้อมูลส่งลูกค้าอัตโนมัติ")
 
 # ==========================================
 # ฟังก์ชันสกัดตัวเลข WW จากข้อความ
@@ -214,7 +214,7 @@ def scan_entries(ws_target, ws_cust_ref, config, check_spec=False):
                 "label": display_label,
                 "is_ng": len(failures) > 0,
                 "failures": failures,
-                "ww_num": extract_ww_num(base_label) # สกัดเลข WW เก็บไว้ใน dict
+                "ww_num": extract_ww_num(base_label)
             })
             col += step
         else:
@@ -224,7 +224,6 @@ def scan_entries(ws_target, ws_cust_ref, config, check_spec=False):
 def copy_cell_exact(src_cell, dst_cell, protect_formulas=True):
     if protect_formulas and isinstance(dst_cell.value, str) and dst_cell.value.startswith("="):
         return
-
     dst_cell.value = src_cell.value
     if src_cell.has_style:
         dst_cell.font = copy(src_cell.font)
@@ -261,107 +260,70 @@ def append_entry_to_customer(ws_raw, ws_cust, src_col, dst_col, config, protect_
             )
 
 # ==========================================
-# ส่วนแสดงผลหน้าเว็บ (Streamlit UI)
+# ส่วนหน้าเว็บหลัก (UI) 
 # ==========================================
-col_up1, col_up2 = st.columns(2)
-with col_up1:
-    cust_file = st.file_uploader("1️⃣ อัปโหลดไฟล์ส่งลูกค้า (Customer File)", type=["xlsx", "xlsm"])
-with col_up2:
-    raw_file = st.file_uploader("2️⃣ อัปโหลดไฟล์ข้อมูลดิบ (Raw Data File)", type=["xlsx", "xlsm"])
+st.markdown("### 1️⃣ ตั้งค่าและอัปโหลดไฟล์")
+col1, col2, col3 = st.columns([1, 1.2, 1.2])
 
-protect_formulas = st.checkbox(
-    "🛡️ ป้องกันการเขียนทับช่องที่มีสูตร (เช่น Total / Average) ที่ผูกไว้แล้วในไฟล์ลูกค้า", 
-    value=True
-)
+with col1:
+    user_ww_input = st.text_input("🎯 พิมพ์ WW ที่ต้องการส่งถึง", placeholder="เช่น 15, WW15 (ว่าง=ทั้งหมด)")
+    protect_formulas = st.checkbox("🛡️ ป้องกันเขียนทับสูตรในไฟล์ลูกค้า", value=True)
+with col2:
+    cust_file = st.file_uploader("📂 อัปโหลดไฟล์ส่งลูกค้า (Customer File)", type=["xlsx", "xlsm"])
+with col3:
+    raw_file = st.file_uploader("📂 อัปโหลดไฟล์ข้อมูลดิบ (Raw Data File)", type=["xlsx", "xlsm"])
+
+# แปลงค่า WW ที่พิมพ์เป็นตัวเลข
+target_ww_num = 9999
+if user_ww_input.strip():
+    match = re.search(r'\d+', user_ww_input)
+    if match:
+        target_ww_num = int(match.group())
 
 if cust_file and raw_file:
     wb_cust_scan = openpyxl.load_workbook(cust_file, data_only=True)
     wb_raw_scan = openpyxl.load_workbook(raw_file, data_only=True)
 
     st.markdown("---")
-    
-    # ---------------------------------------------------------
-    # PHASE 1: Pre-scan ดึงข้อมูลและค้นหา WW ทั้งหมดที่มีในไฟล์ดิบ
-    # ---------------------------------------------------------
-    sheet_scan_results = {}
-    all_found_wws = set()
+    st.subheader("📋 ตรวจสอบข้อมูลก่อนสร้างไฟล์")
 
-    for sheet_name, config in SHEET_CONFIGS.items():
-        if sheet_name not in wb_cust_scan.sheetnames or sheet_name not in wb_raw_scan.sheetnames:
-            continue
-
-        ws_c = wb_cust_scan[sheet_name]
-        ws_r = wb_raw_scan[sheet_name]
-
-        cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False)
-        raw_entries = scan_entries(ws_r, ws_c, config, check_spec=True)
-
-        if cust_entries:
-            last_cust_entry = cust_entries[-1]
-            last_cust_id = last_cust_entry["id"]
-            next_dest_col = last_cust_entry["col"] + config["step"]
-        else:
-            last_cust_id = None
-            last_cust_entry = None
-            next_dest_col = config["start_col"]
-
-        cust_id_set = {e["id"] for e in cust_entries}
-        available_to_select = []
-
-        if last_cust_id:
-            match_indices = [i for i, e in enumerate(raw_entries) if e["id"] == last_cust_id]
-            if match_indices:
-                cutoff_idx = match_indices[-1]
-                available_to_select = raw_entries[cutoff_idx + 1:]
-            else:
-                available_to_select = [e for e in raw_entries if e["id"] not in cust_id_set]
-        else:
-            available_to_select = raw_entries
-
-        # เก็บเลข WW ไว้เป็นตัวเลือก
-        for e in available_to_select:
-            if e["ww_num"] is not None:
-                all_found_wws.add(e["ww_num"])
-
-        sheet_scan_results[sheet_name] = {
-            "last_cust": last_cust_entry,
-            "available": available_to_select,
-            "next_col": next_dest_col
-        }
-
-    # ---------------------------------------------------------
-    # PHASE 2: ให้ผู้ใช้เลือก Target WW
-    # ---------------------------------------------------------
-    st.subheader("⚙️ ตั้งค่าขอบเขตข้อมูล")
-    ww_options = ["ส่งข้อมูลทั้งหมดที่ผ่าน Spec"] + [f"WW{ww:02d}" for ww in sorted(list(all_found_wws))]
-    selected_target_ww = st.selectbox(
-        "📅 เลือก WW ที่ต้องการส่งข้อมูลถึง (ระบบจะติ๊กข้อมูลที่ <= WW นี้ และผ่าน Spec ให้อัตโนมัติ):", 
-        options=ww_options
-    )
-    
-    if selected_target_ww == "ส่งข้อมูลทั้งหมดที่ผ่าน Spec":
-        target_ww_num = 9999 # เลขเยอะๆ เพื่อให้ครอบคลุมทุก WW
-    else:
-        target_ww_num = int(selected_target_ww.replace("WW", ""))
-
-    # ---------------------------------------------------------
-    # PHASE 3: แสดง Checkbox ที่ผูก Logic Auto-Tick แล้ว
-    # ---------------------------------------------------------
-    st.markdown("---")
-    st.subheader("📋 เลือกชุดข้อมูล (ตรวจสอบและแก้ไขก่อนสร้างไฟล์)")
-    
     selected_items = {}
-    tabs = st.tabs(list(sheet_scan_results.keys()))
+    tabs = st.tabs(list(SHEET_CONFIGS.keys()))
 
-    for idx, (sheet_name, data) in enumerate(sheet_scan_results.items()):
+    for idx, (sheet_name, config) in enumerate(SHEET_CONFIGS.items()):
         with tabs[idx]:
-            available_to_select = data["available"]
-            last_cust_entry = data["last_cust"]
-            
-            if last_cust_entry:
+            if sheet_name not in wb_cust_scan.sheetnames or sheet_name not in wb_raw_scan.sheetnames:
+                st.warning(f"⚠️ ไม่พบชีทชื่อ **{sheet_name}** ในไฟล์")
+                continue
+
+            ws_c = wb_cust_scan[sheet_name]
+            ws_r = wb_raw_scan[sheet_name]
+
+            cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False)
+            raw_entries = scan_entries(ws_r, ws_c, config, check_spec=True)
+
+            if cust_entries:
+                last_cust_entry = cust_entries[-1]
+                last_cust_id = last_cust_entry["id"]
+                next_dest_col = last_cust_entry["col"] + config["step"]
                 st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust_entry['label']}`")
             else:
+                last_cust_id = None
+                next_dest_col = config["start_col"]
                 st.info("📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า**")
+
+            cust_id_set = {e["id"] for e in cust_entries}
+            available_to_select = []
+
+            if last_cust_id:
+                match_indices = [i for i, e in enumerate(raw_entries) if e["id"] == last_cust_id]
+                if match_indices:
+                    cutoff_idx = match_indices[-1]
+                    available_to_select = raw_entries[cutoff_idx + 1:]
+                else:
+                    available_to_select = [e for e in raw_entries if e["id"] not in cust_id_set]
+            else:
+                available_to_select = raw_entries
 
             if not available_to_select:
                 st.success("✅ ข้อมูลในชีทนี้ส่งครบถ้วนแล้ว")
@@ -371,7 +333,7 @@ if cust_file and raw_file:
                 for entry in available_to_select:
                     # เงื่อนไข Auto-Tick:
                     # 1. ไม่หลุด Spec (not is_ng)
-                    # 2. ถ้าหา WW เจอ ต้องน้อยกว่าหรือเท่ากับ WW ที่เลือก / ถ้าหา WW ไม่เจอ (None) ยึดตามเงื่อนไขผ่าน Spec
+                    # 2. WW น้อยกว่าหรือเท่ากับที่พิมพ์ตั้งไว้ด้านบน
                     is_within_ww = (entry["ww_num"] <= target_ww_num) if entry["ww_num"] is not None else True
                     
                     default_checked = (not entry["is_ng"]) and is_within_ww
@@ -385,7 +347,7 @@ if cust_file and raw_file:
                         sheet_selections.append(entry)
 
                 selected_items[sheet_name] = {
-                    "next_col": data["next_col"],
+                    "next_col": next_dest_col,
                     "entries": sheet_selections
                 }
 
@@ -394,7 +356,7 @@ if cust_file and raw_file:
         with st.spinner("กำลังคัดลอกข้อมูล รูปแบบตาราง และ Comment ลงในไฟล์ลูกค้า..."):
             cust_file.seek(0)
             raw_file.seek(0)
-            wb_cust_out = openpyxl.load_workbook(cust_file, keep_vba=True) # เพิ่ม keep_vba ตามที่แนะนำไปก่อนหน้าครับ
+            wb_cust_out = openpyxl.load_workbook(cust_file, keep_vba=True)
             wb_raw_src = openpyxl.load_workbook(raw_file, data_only=True)
 
             total_added = 0
