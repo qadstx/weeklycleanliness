@@ -4,12 +4,21 @@ from openpyxl.utils import get_column_letter
 from copy import copy
 import io
 import datetime
+import re
 
 st.set_page_config(page_title="Customer Data Auto-Filler", layout="wide")
-st.title("📊 ระบบคัดกรองและเติมข้อมูลส่งลูกค้าอัตโนมัติ (พร้อมเช็ค Spec)")
+st.title("📊 ระบบคัดกรองและเติมข้อมูลส่งลูกค้าอัตโนมัติ (พร้อมเช็ค Spec & WW)")
 
 # ==========================================
-# ตั้งค่าพิกัดแถว รูปแบบคอลัมน์ และเงื่อนไข Spec ของทั้ง 8 ชีท
+# ฟังก์ชันสกัดตัวเลข WW จากข้อความ
+# ==========================================
+def extract_ww_num(text):
+    """ค้นหาคำว่า WW ตามด้วยตัวเลข เช่น WW15, WW.15, WW 15 และคืนค่าเป็นตัวเลข (int)"""
+    match = re.search(r'WW\.?\s*(\d+)', str(text), re.IGNORECASE)
+    return int(match.group(1)) if match else None
+
+# ==========================================
+# ตั้งค่าพิกัดแถว รูปแบบคอลัมน์ และเงื่อนไข Spec
 # ==========================================
 def expand_ranges(ranges_list):
     rows = []
@@ -111,7 +120,6 @@ def format_val(val):
     return str(val).strip()
 
 def to_float(val):
-    """แปลงค่าในเซลล์เป็นตัวเลขเพื่อเทียบ Spec (ถ้าเป็น NA, ND หรือข้อความจะคืนค่า None)"""
     if val is None:
         return None
     if isinstance(val, (int, float)):
@@ -125,14 +133,12 @@ def to_float(val):
         return None
 
 def find_spec_value(ws_raw, ws_cust, spec_row, col):
-    """ดึงค่า Spec จากคอลัมน์ปัจจุบัน ถ้าช่องนั้นว่างให้วิ่งหาค่า Spec จากคอลัมน์ข้างเคียงในแถวเดียวกัน"""
     for ws in (ws_raw, ws_cust):
         if ws is None:
             continue
         v = to_float(ws.cell(row=spec_row, column=col).value)
         if v is not None:
             return v
-    # กรณีคอลัมน์ใหม่ในไฟล์ดิบยังไม่ได้ก๊อปเลข Spec ยาวไปทางขวา ให้ดึงค่า Spec มาตรฐานจากคอลัมน์ที่มีในแถวเดียวกัน
     for ws in (ws_cust, ws_raw):
         if ws is None:
             continue
@@ -143,7 +149,6 @@ def find_spec_value(ws_raw, ws_cust, spec_row, col):
     return None
 
 def evaluate_entry_spec(ws_raw, ws_cust, start_col, config):
-    """ตรวจสอบว่าชุดข้อมูลนั้นมีแถวไหนหลุด Spec หรือไม่"""
     step = config["step"]
     spec_checks = config.get("spec_checks", [])
     failures = []
@@ -208,7 +213,8 @@ def scan_entries(ws_target, ws_cust_ref, config, check_spec=False):
                 "id": id_str,
                 "label": display_label,
                 "is_ng": len(failures) > 0,
-                "failures": failures
+                "failures": failures,
+                "ww_num": extract_ww_num(base_label) # สกัดเลข WW เก็บไว้ใน dict
             })
             col += step
         else:
@@ -220,19 +226,16 @@ def copy_cell_exact(src_cell, dst_cell, protect_formulas=True):
         return
 
     dst_cell.value = src_cell.value
-
     if src_cell.has_style:
         dst_cell.font = copy(src_cell.font)
         dst_cell.fill = copy(src_cell.fill)
         dst_cell.border = copy(src_cell.border)
         dst_cell.alignment = copy(src_cell.alignment)
         dst_cell.number_format = src_cell.number_format
-
     if src_cell.comment:
         dst_cell.comment = copy(src_cell.comment)
     else:
         dst_cell.comment = None
-
     if src_cell.hyperlink:
         dst_cell.hyperlink = copy(src_cell.hyperlink)
 
@@ -242,7 +245,6 @@ def append_entry_to_customer(ws_raw, ws_cust, src_col, dst_col, config, protect_
 
     for r in copy_rows:
         merge_w = get_merged_width(ws_raw, r, src_col)
-
         for m_range in list(ws_cust.merged_cells.ranges):
             if m_range.min_row <= r <= m_range.max_row and not (m_range.max_col < dst_col or m_range.min_col >= dst_col + step):
                 ws_cust.unmerge_cells(str(m_range))
@@ -277,67 +279,113 @@ if cust_file and raw_file:
     wb_raw_scan = openpyxl.load_workbook(raw_file, data_only=True)
 
     st.markdown("---")
-    st.subheader("📋 เลือกข้อมูลที่ต้องการเติมลงในไฟล์ส่งลูกค้า (ระบบติ๊กเลือกเฉพาะตัวที่ผ่าน Spec ให้อัตโนมัติ)")
+    
+    # ---------------------------------------------------------
+    # PHASE 1: Pre-scan ดึงข้อมูลและค้นหา WW ทั้งหมดที่มีในไฟล์ดิบ
+    # ---------------------------------------------------------
+    sheet_scan_results = {}
+    all_found_wws = set()
 
+    for sheet_name, config in SHEET_CONFIGS.items():
+        if sheet_name not in wb_cust_scan.sheetnames or sheet_name not in wb_raw_scan.sheetnames:
+            continue
+
+        ws_c = wb_cust_scan[sheet_name]
+        ws_r = wb_raw_scan[sheet_name]
+
+        cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False)
+        raw_entries = scan_entries(ws_r, ws_c, config, check_spec=True)
+
+        if cust_entries:
+            last_cust_entry = cust_entries[-1]
+            last_cust_id = last_cust_entry["id"]
+            next_dest_col = last_cust_entry["col"] + config["step"]
+        else:
+            last_cust_id = None
+            last_cust_entry = None
+            next_dest_col = config["start_col"]
+
+        cust_id_set = {e["id"] for e in cust_entries}
+        available_to_select = []
+
+        if last_cust_id:
+            match_indices = [i for i, e in enumerate(raw_entries) if e["id"] == last_cust_id]
+            if match_indices:
+                cutoff_idx = match_indices[-1]
+                available_to_select = raw_entries[cutoff_idx + 1:]
+            else:
+                available_to_select = [e for e in raw_entries if e["id"] not in cust_id_set]
+        else:
+            available_to_select = raw_entries
+
+        # เก็บเลข WW ไว้เป็นตัวเลือก
+        for e in available_to_select:
+            if e["ww_num"] is not None:
+                all_found_wws.add(e["ww_num"])
+
+        sheet_scan_results[sheet_name] = {
+            "last_cust": last_cust_entry,
+            "available": available_to_select,
+            "next_col": next_dest_col
+        }
+
+    # ---------------------------------------------------------
+    # PHASE 2: ให้ผู้ใช้เลือก Target WW
+    # ---------------------------------------------------------
+    st.subheader("⚙️ ตั้งค่าขอบเขตข้อมูล")
+    ww_options = ["ส่งข้อมูลทั้งหมดที่ผ่าน Spec"] + [f"WW{ww:02d}" for ww in sorted(list(all_found_wws))]
+    selected_target_ww = st.selectbox(
+        "📅 เลือก WW ที่ต้องการส่งข้อมูลถึง (ระบบจะติ๊กข้อมูลที่ <= WW นี้ และผ่าน Spec ให้อัตโนมัติ):", 
+        options=ww_options
+    )
+    
+    if selected_target_ww == "ส่งข้อมูลทั้งหมดที่ผ่าน Spec":
+        target_ww_num = 9999 # เลขเยอะๆ เพื่อให้ครอบคลุมทุก WW
+    else:
+        target_ww_num = int(selected_target_ww.replace("WW", ""))
+
+    # ---------------------------------------------------------
+    # PHASE 3: แสดง Checkbox ที่ผูก Logic Auto-Tick แล้ว
+    # ---------------------------------------------------------
+    st.markdown("---")
+    st.subheader("📋 เลือกชุดข้อมูล (ตรวจสอบและแก้ไขก่อนสร้างไฟล์)")
+    
     selected_items = {}
-    tabs = st.tabs(list(SHEET_CONFIGS.keys()))
+    tabs = st.tabs(list(sheet_scan_results.keys()))
 
-    for idx, (sheet_name, config) in enumerate(SHEET_CONFIGS.items()):
+    for idx, (sheet_name, data) in enumerate(sheet_scan_results.items()):
         with tabs[idx]:
-            if sheet_name not in wb_cust_scan.sheetnames or sheet_name not in wb_raw_scan.sheetnames:
-                st.warning(f"⚠️ ไม่พบชีทชื่อ **{sheet_name}** ในไฟล์ใดไฟล์หนึ่ง")
-                continue
-
-            ws_c = wb_cust_scan[sheet_name]
-            ws_r = wb_raw_scan[sheet_name]
-
-            cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False)
-            raw_entries = scan_entries(ws_r, ws_c, config, check_spec=True)
-
-            if cust_entries:
-                last_cust_entry = cust_entries[-1]
-                last_cust_id = last_cust_entry["id"]
-                next_dest_col = last_cust_entry["col"] + config["step"]
-                st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust_entry['label']}` (คอลัมน์ถัดไปที่จะกรอกคือ **{get_column_letter(next_dest_col)}**)")
+            available_to_select = data["available"]
+            last_cust_entry = data["last_cust"]
+            
+            if last_cust_entry:
+                st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust_entry['label']}`")
             else:
-                last_cust_id = None
-                next_dest_col = config["start_col"]
-                st.info("📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า** ระบบจะแสดงข้อมูลทั้งหมดจากไฟล์ดิบ")
-
-            cust_id_set = {e["id"] for e in cust_entries}
-            available_to_select = []
-
-            if last_cust_id:
-                match_indices = [i for i, e in enumerate(raw_entries) if e["id"] == last_cust_id]
-                if match_indices:
-                    cutoff_idx = match_indices[-1]
-                    available_to_select = raw_entries[cutoff_idx + 1:]
-                else:
-                    available_to_select = [e for e in raw_entries if e["id"] not in cust_id_set]
-            else:
-                available_to_select = raw_entries
+                st.info("📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า**")
 
             if not available_to_select:
-                st.success("✅ ข้อมูลในชีทนี้ส่งครบถ้วนแล้ว ไม่มีข้อมูลใหม่ให้เลือก")
+                st.success("✅ ข้อมูลในชีทนี้ส่งครบถ้วนแล้ว")
                 selected_items[sheet_name] = []
             else:
-                pass_count = sum(1 for e in available_to_select if not e["is_ng"])
-                ng_count = sum(1 for e in available_to_select if e["is_ng"])
-                st.write(f"พบข้อมูลใหม่ **{len(available_to_select)}** ชุด (✅ ผ่าน Spec **{pass_count}** ชุด | ⚠️ หลุด Spec **{ng_count}** ชุด):")
-
                 sheet_selections = []
                 for entry in available_to_select:
-                    # ปรับค่าเริ่มต้นให้เป็น False (ไม่ติ๊กเลย) เพื่อให้ผู้ใช้ติ๊กเองทั้งหมด
+                    # เงื่อนไข Auto-Tick:
+                    # 1. ไม่หลุด Spec (not is_ng)
+                    # 2. ถ้าหา WW เจอ ต้องน้อยกว่าหรือเท่ากับ WW ที่เลือก / ถ้าหา WW ไม่เจอ (None) ยึดตามเงื่อนไขผ่าน Spec
+                    is_within_ww = (entry["ww_num"] <= target_ww_num) if entry["ww_num"] is not None else True
+                    
+                    default_checked = (not entry["is_ng"]) and is_within_ww
+
                     checked = st.checkbox(
                         entry["label"],
-                        value=False, 
+                        value=default_checked,
                         key=f"chk_{sheet_name}_{entry['col']}"
                     )
                     if checked:
                         sheet_selections.append(entry)
 
                 selected_items[sheet_name] = {
-                    "next_col": next_dest_col,
+                    "next_col": data["next_col"],
                     "entries": sheet_selections
                 }
 
@@ -346,8 +394,8 @@ if cust_file and raw_file:
         with st.spinner("กำลังคัดลอกข้อมูล รูปแบบตาราง และ Comment ลงในไฟล์ลูกค้า..."):
             cust_file.seek(0)
             raw_file.seek(0)
-            wb_cust_out = openpyxl.load_workbook(cust_file, keep_vba=True)
-            wb_raw_src = openpyxl.load_workbook(raw_file)
+            wb_cust_out = openpyxl.load_workbook(cust_file, keep_vba=True) # เพิ่ม keep_vba ตามที่แนะนำไปก่อนหน้าครับ
+            wb_raw_src = openpyxl.load_workbook(raw_file, data_only=True)
 
             total_added = 0
             for sheet_name, data in selected_items.items():
@@ -375,11 +423,11 @@ if cust_file and raw_file:
             wb_cust_out.save(output_buffer)
             output_buffer.seek(0)
 
-            st.success(f"🎉 เติมข้อมูลสำเร็จทั้งหมด **{total_added}** ชุดข้อมูล! กราฟ สูตร และ Comment อยู่ครบถ้วน")
+            st.success(f"🎉 เติมข้อมูลสำเร็จทั้งหมด **{total_added}** ชุดข้อมูล!")
             st.download_button(
                 label="📥 ดาวน์โหลดไฟล์ส่งลูกค้า (Updated Customer File)",
                 data=output_buffer,
                 file_name=f"Updated_{cust_file.name}",
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime="application/vnd.ms-excel.sheet.macroEnabled.12" if cust_file.name.endswith(".xlsm") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
