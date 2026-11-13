@@ -356,7 +356,10 @@ if cust_file and raw_file:
         with st.spinner("กำลังคัดลอกข้อมูล รูปแบบตาราง และ Comment ลงในไฟล์ลูกค้า..."):
             cust_file.seek(0)
             raw_file.seek(0)
-            wb_cust_out = openpyxl.load_workbook(cust_file, keep_vba=True)
+            
+            # แก้ไขที่ 1: เช็คว่าเป็นไฟล์ .xlsm จริงหรือไม่ ค่อยเปิดโหมด keep_vba
+            is_xlsm = cust_file.name.lower().endswith(".xlsm")
+            wb_cust_out = openpyxl.load_workbook(cust_file, keep_vba=is_xlsm)
             wb_raw_src = openpyxl.load_workbook(raw_file, data_only=True)
 
             total_added = 0
@@ -383,13 +386,15 @@ if cust_file and raw_file:
 
             output_buffer = io.BytesIO()
             wb_cust_out.save(output_buffer)
-            output_buffer.seek(0)
+            
+            # แก้ไขที่ 2: ใช้ .getvalue() เพื่อดึง raw bytes ป้องกันไฟล์เสียหาย
+            excel_data = output_buffer.getvalue()
 
             st.success(f"🎉 เติมข้อมูลสำเร็จทั้งหมด **{total_added}** ชุดข้อมูล!")
             st.download_button(
                 label="📥 ดาวน์โหลดไฟล์ส่งลูกค้า (Updated Customer File)",
-                data=output_buffer,
+                data=excel_data,
                 file_name=f"Updated_{cust_file.name}",
-                mime="application/vnd.ms-excel.sheet.macroEnabled.12" if cust_file.name.endswith(".xlsm") else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                mime="application/vnd.ms-excel.sheet.macroEnabled.12" if is_xlsm else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 use_container_width=True
             )
