@@ -604,4 +604,192 @@ def load_uploaded_files(upload_input):
 # ==========================================
 st.markdown("### 1️⃣ ตั้งค่าจุดตัดข้อมูล (WW / วันที่) และอัปโหลดไฟล์")
 
-col_cfg1, col_cfg2, col_up1, col_
+col_cfg1, col_cfg2, col_up1, col_up2 = st.columns([1, 1, 1.3, 1.3])
+
+with col_cfg1:
+    user_ww_input = st.text_input("🎯 WW ที่ต้องการส่งถึง", placeholder="เช่น 17 หรือ WW17 (ว่าง=ไม่จำกัด)")
+    protect_formulas = st.checkbox("🛡️ ป้องกันเขียนทับสูตร", value=True)
+
+with col_cfg2:
+    user_date_input = st.date_input("📅 วันที่ต้องการส่งถึง (กรณีชีทไม่มี WW)", value=None)
+
+with col_up1:
+    cust_zip_upload = st.file_uploader(
+        "📂 อัปโหลดไฟล์ลูกค้า (.zip หรือ .xlsx/.xlsm)",
+        type=["zip", "xlsx", "xlsm"],
+        accept_multiple_files=True
+    )
+
+with col_up2:
+    raw_zip_upload = st.file_uploader(
+        "📂 อัปโหลดไฟล์ข้อมูลดิบ (.zip หรือ .xlsx/.xlsm)",
+        type=["zip", "xlsx", "xlsm"],
+        accept_multiple_files=True
+    )
+
+target_ww_num = None
+if user_ww_input.strip():
+    match = re.search(r'\d+', user_ww_input)
+    if match:
+        target_ww_num = int(match.group())
+target_date_val = user_date_input
+
+if cust_zip_upload and raw_zip_upload:
+    with st.spinner("กำลังอ่านไฟล์และจับคู่โมเดล..."):
+        cust_files_map = load_uploaded_files(cust_zip_upload)
+        raw_files_map = load_uploaded_files(raw_zip_upload)
+
+        if not cust_files_map or not raw_files_map:
+            st.error("❌ ไม่พบไฟล์ Excel (.xlsx / .xlsm) ข้างในไฟล์ที่อัปโหลด กรุณาตรวจสอบไฟล์อีกครั้ง")
+            st.stop()
+
+        paired_models = []
+        raw_norm_map = {normalize_filename(rn): rn for rn in raw_files_map.keys()}
+
+        for c_name in sorted(cust_files_map.keys()):
+            if c_name in raw_files_map:
+                paired_models.append((c_name, c_name))
+            else:
+                c_norm = normalize_filename(c_name)
+                if c_norm in raw_norm_map:
+                    paired_models.append((c_name, raw_norm_map[c_norm]))
+
+        if not paired_models and len(cust_files_map) == 1 and len(raw_files_map) == 1:
+            paired_models.append((list(cust_files_map.keys())[0], list(raw_files_map.keys())[0]))
+
+        if not paired_models:
+            st.error("❌ ไม่พบไฟล์ที่ชื่อตรงกันระหว่างไฟล์ลูกค้าและไฟล์ดิบ")
+            st.stop()
+
+    st.markdown("---")
+    st.subheader(f"📋 จับคู่สำเร็จ {len(paired_models)} โมเดล (คลิกที่ชื่อโมเดลเพื่อตรวจสอบและติ๊กเลือกข้อมูล)")
+
+    all_models_data = {}
+
+    for file_idx, (c_name, r_name) in enumerate(paired_models):
+        profile_name, model_cfg = detect_model_profile(c_name)
+        pair_title = f"📦 โมเดล: {c_name}  —  [ใช้โปรไฟล์แถว: {profile_name}]"
+
+        with st.expander(pair_title, expanded=(file_idx == 0)):
+            wb_cust_scan = openpyxl.load_workbook(io.BytesIO(cust_files_map[c_name]), data_only=True)
+            wb_raw_scan = openpyxl.load_workbook(io.BytesIO(raw_files_map[r_name]), data_only=True)
+
+            model_selections = {}
+            sheet_names_list = list(model_cfg.keys())
+            tabs = st.tabs(sheet_names_list)
+
+            for idx, sheet_key in enumerate(sheet_names_list):
+                config = model_cfg[sheet_key]
+                with tabs[idx]:
+                    ws_c = find_sheet_in_wb(wb_cust_scan, sheet_key)
+                    ws_r = find_sheet_in_wb(wb_raw_scan, sheet_key)
+
+                    if ws_c is None or ws_r is None:
+                        st.warning(f"⚠️ ไม่พบชีท **{sheet_key}** ในโมเดลนี้")
+                        continue
+
+                    cust_entries = scan_all_valid_entries(ws_c, ws_c, config, check_spec=False)
+                    raw_entries = scan_all_valid_entries(ws_r, ws_c, config, check_spec=True)
+
+                    last_cust = cust_entries[-1] if cust_entries else None
+                    # วางต่อท้ายคอลัมน์สุดท้ายที่มีผลเทสจริงทันที (end_col + 1) ไม่เกิดช่องว่างแหว่งเหมือนคอลัมน์ S อีกต่อไป
+                    next_dest_col = last_cust["end_col"] + 1 if last_cust else config["start_col"]
+
+                    if last_cust:
+                        st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust['label']}` (คอลัมน์ถัดไปที่จะกรอก: **{get_column_letter(next_dest_col)}**)")
+                    else:
+                        st.info(f"📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า** (จะเริ่มกรอกที่คอลัมน์ **{get_column_letter(next_dest_col)}**)")
+
+                    available_to_select = filter_new_raw_entries(cust_entries, raw_entries)
+
+                    if not available_to_select:
+                        st.success("✅ ข้อมูลในชีทนี้ส่งครบถ้วนแล้ว")
+                        model_selections[sheet_key] = []
+                    else:
+                        sheet_selections = []
+                        for entry in available_to_select:
+                            within_cutoff = True
+                            if entry["ww_num"] is not None and target_ww_num is not None:
+                                within_cutoff = (entry["ww_num"] <= target_ww_num)
+                            elif entry["date_val"] is not None and target_date_val is not None:
+                                within_cutoff = (entry["date_val"] <= target_date_val)
+
+                            default_checked = (not entry["is_ng"]) and within_cutoff
+
+                            checked = st.checkbox(
+                                entry["label"],
+                                value=default_checked,
+                                key=f"chk_{c_name}_{sheet_key}_{entry['col']}_{target_ww_num}_{target_date_val}"
+                            )
+                            if checked:
+                                sheet_selections.append(entry)
+
+                        model_selections[sheet_key] = {
+                            "next_col": next_dest_col,
+                            "entries": sheet_selections,
+                            "config": config
+                        }
+
+            all_models_data[c_name] = {
+                "raw_name": r_name,
+                "selections": model_selections
+            }
+
+    st.markdown("---")
+    if st.button("🚀 ประมวลผลและดาวน์โหลดไฟล์", type="primary", use_container_width=True):
+        with st.spinner("กำลังคัดลอกข้อมูลและบันทึกไฟล์..."):
+            total_added_all = 0
+            processed_files = {}
+
+            for c_name, data in all_models_data.items():
+                r_name = data["raw_name"]
+                is_xlsm = c_name.lower().endswith(".xlsm")
+                wb_cust_out = openpyxl.load_workbook(io.BytesIO(cust_files_map[c_name]), keep_vba=is_xlsm)
+                wb_raw_src = openpyxl.load_workbook(io.BytesIO(raw_files_map[r_name]), data_only=True)
+
+                for sheet_key, sheet_data in data["selections"].items():
+                    if not sheet_data or not sheet_data["entries"]:
+                        continue
+
+                    ws_c_out = find_sheet_in_wb(wb_cust_out, sheet_key)
+                    ws_r_src = find_sheet_in_wb(wb_raw_src, sheet_key)
+                    if ws_c_out is None or ws_r_src is None:
+                        continue
+
+                    cfg = sheet_data["config"]
+                    curr_dst_col = sheet_data["next_col"]
+
+                    for entry in sheet_data["entries"]:
+                        span = entry.get("span", cfg["step"])
+                        append_entry_to_customer(ws_r_src, ws_c_out, entry["col"], curr_dst_col, span, cfg, protect_formulas)
+                        curr_dst_col += span
+                        total_added_all += 1
+
+                file_out_buffer = io.BytesIO()
+                wb_cust_out.save(file_out_buffer)
+                processed_files[c_name] = file_out_buffer.getvalue()
+
+            st.success(f"🎉 เติมข้อมูลสำเร็จทั้งหมด **{total_added_all}** ชุดข้อมูล จาก {len(processed_files)} โมเดล!")
+
+            if len(processed_files) == 1:
+                single_name = list(processed_files.keys())[0]
+                is_xlsm = single_name.lower().endswith(".xlsm")
+                st.download_button(
+                    label=f"📥 ดาวน์โหลดไฟล์ {single_name}",
+                    data=processed_files[single_name],
+                    file_name=single_name,
+                    mime="application/vnd.ms-excel.sheet.macroEnabled.12" if is_xlsm else "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            else:
+                out_zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(out_zip_buffer, "w", zipfile.ZIP_DEFLATED) as out_zip:
+                    for f_name, f_bytes in processed_files.items():
+                        out_zip.writestr(f_name, f_bytes)
+                st.download_button(
+                    label="📥 ดาวน์โหลดไฟล์ ZIP ลูกค้าทั้งหมด (ชื่อไฟล์ข้างในเหมือนเดิมทุกโมเดล)",
+                    data=out_zip_buffer.getvalue(),
+                    file_name="Customer_Files.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
