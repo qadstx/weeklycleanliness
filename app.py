@@ -253,7 +253,6 @@ def find_sheet_in_wb(wb, target_name):
     return None
 
 def normalize_filename(name):
-    """ทำความสะอาดชื่อไฟล์เพื่อช่วยจับคู่อัตโนมัติแม้มีคำว่า ใหม่ / Copy / เว้นวรรคต่างกัน"""
     s = os.path.splitext(name)[0].lower()
     for word in ["ใหม่", "copy of", "updated_", "raw_", "ctm_", "customer_"]:
         s = s.replace(word, "")
@@ -327,32 +326,41 @@ def get_merged_width(ws, row, col):
             return m.max_col - m.min_col + 1
     return 1
 
-def scan_entries(ws_target, ws_cust_ref, config, check_spec=False):
+def scan_entries(ws_target, ws_cust_ref, config, check_spec=False, is_raw=False, last_cust_col_idx=None):
+    """
+    สแกนข้อมูลโดยใช้ตำแหน่งคอลัมน์เป็นจุดตัดแทนการเทียบชื่อ
+    ถ้าเป็นไฟล์ดิบ (is_raw) จะเริ่มหาจากคอลัมน์ถัดจากไฟล์ลูกค้าเสมอ
+    """
     entries = []
     header_rows = config["header_rows"]
     step = config["step"]
-    col = config["start_col"]
+    
+    col = last_cust_col_idx + step if (is_raw and last_cust_col_idx) else config["start_col"]
     max_col = ws_target.max_column
 
     while col <= max_col:
         tokens = []
         ww_num = None
         entry_date = None
+        has_data = False
 
-        for r in header_rows:
+        # ตรวจสอบว่าคอลัมน์นี้มีข้อมูลจริงไหม เช็คทั้งแถวหัวและข้อมูล 3 แถวแรก
+        for r in header_rows + config["copy_rows"][:3]: 
             raw_v = ws_target.cell(row=r, column=col).value
-            if is_valid_header_token(raw_v):
-                s_val = format_val(raw_v)
-                if s_val and s_val not in tokens:
-                    tokens.append(s_val)
-                if ww_num is None:
-                    ww_num = extract_ww_num(s_val)
-                if entry_date is None:
-                    entry_date = extract_date_val(raw_v)
+            if is_valid_header_token(raw_v) or to_float(raw_v) is not None:
+                has_data = True
+                if r in header_rows:
+                    s_val = format_val(raw_v)
+                    if s_val and s_val not in tokens:
+                        tokens.append(s_val)
+                    if ww_num is None:
+                        ww_num = extract_ww_num(s_val)
+                    if entry_date is None:
+                        entry_date = extract_date_val(raw_v)
 
-        if tokens:
-            primary_id = tokens[-1]
-            full_sig = " | ".join(tokens)
+        if has_data:
+            primary_id = tokens[-1] if tokens else f"Data_Col_{get_column_letter(col)}"
+            full_sig = " | ".join(tokens) if tokens else f"Data_Col_{get_column_letter(col)}"
 
             failures = evaluate_entry_spec(ws_target, ws_cust_ref, col, config) if check_spec else []
             base_label = f"[Col {get_column_letter(col)}] {full_sig}"
@@ -370,6 +378,7 @@ def scan_entries(ws_target, ws_cust_ref, config, check_spec=False):
             col += step
         else:
             col += 1
+            
     return entries
 
 def copy_cell_exact(src_cell, dst_cell, protect_formulas=True):
@@ -401,11 +410,9 @@ def append_entry_to_customer(ws_raw, ws_cust, src_col, dst_col, config, protect_
             ws_cust.merge_cells(start_row=r, start_column=dst_col, end_row=r, end_column=dst_col + merge_w - 1)
 
 def load_uploaded_files(upload_input):
-    """รองรับทั้งไฟล์เดี่ยว หลายไฟล์ (list) และไฟล์ .zip พร้อมรีเซ็ต Pointer เสมอ"""
     files_dict = {}
     if not upload_input:
         return files_dict
-
     items = upload_input if isinstance(upload_input, list) else [upload_input]
     for item in items:
         item.seek(0)
@@ -453,7 +460,6 @@ if user_ww_input.strip():
     match = re.search(r'\d+', user_ww_input)
     if match:
         target_ww_num = int(match.group())
-
 target_date_val = user_date_input
 
 if cust_zip_upload and raw_zip_upload:
@@ -465,8 +471,7 @@ if cust_zip_upload and raw_zip_upload:
             st.error("❌ ไม่พบไฟล์ Excel (.xlsx / .xlsm) ข้างในไฟล์ที่อัปโหลด กรุณาตรวจสอบไฟล์อีกครั้ง")
             st.stop()
 
-        # จับคู่ไฟล์อัตโนมัติ (1. ชื่อตรงกันเป๊ะ -> 2. ชื่อหลังตัดคำว่า ใหม่/เว้นวรรค ตรงกัน -> 3. กรณีมีแค่ 1 ไฟล์)
-        paired_models = [] # list of (cust_name, raw_name)
+        paired_models = []
         raw_norm_map = {normalize_filename(rn): rn for rn in raw_files_map.keys()}
 
         for c_name in sorted(cust_files_map.keys()):
@@ -482,8 +487,6 @@ if cust_zip_upload and raw_zip_upload:
 
         if not paired_models:
             st.error("❌ ไม่พบไฟล์ที่ชื่อตรงกันระหว่างไฟล์ลูกค้าและไฟล์ดิบ")
-            st.write("**รายชื่อไฟล์ในฝั่งลูกค้า:**", list(cust_files_map.keys()))
-            st.write("**รายชื่อไฟล์ในฝั่งข้อมูลดิบ:**", list(raw_files_map.keys()))
             st.stop()
 
     st.markdown("---")
@@ -494,10 +497,7 @@ if cust_zip_upload and raw_zip_upload:
     for file_idx, (c_name, r_name) in enumerate(paired_models):
         profile_name, model_cfg = detect_model_profile(c_name)
         pair_title = f"📦 โมเดล: {c_name}  —  [ใช้โปรไฟล์แถว: {profile_name}]"
-        if c_name != r_name:
-            pair_title += f" (คู่กับไฟล์ดิบ: {r_name})"
-
-        # เปิดกางโมเดลแรกให้อัตโนมัติเพื่อให้เห็นผลลัพธ์ทันที
+        
         with st.expander(pair_title, expanded=(file_idx == 0)):
             wb_cust_scan = openpyxl.load_workbook(io.BytesIO(cust_files_map[c_name]), data_only=True)
             wb_raw_scan = openpyxl.load_workbook(io.BytesIO(raw_files_map[r_name]), data_only=True)
@@ -513,38 +513,23 @@ if cust_zip_upload and raw_zip_upload:
                     ws_r = find_sheet_in_wb(wb_raw_scan, sheet_key)
 
                     if ws_c is None or ws_r is None:
-                        st.warning(f"⚠️ ไม่พบชีท **{sheet_key}** ในโมเดลนี้ (ชีทที่มีในไฟล์: {', '.join(wb_cust_scan.sheetnames)})")
+                        st.warning(f"⚠️ ไม่พบชีท **{sheet_key}** ในโมเดลนี้")
                         continue
 
-                    cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False)
-                    raw_entries = scan_entries(ws_r, ws_c, config, check_spec=True)
-
+                    # สแกนไฟล์ลูกค้าก่อน เพื่อหาคอลัมน์สุดท้ายที่มีข้อมูล
+                    cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False, is_raw=False)
+                    
                     last_cust = cust_entries[-1] if cust_entries else None
-                    next_dest_col = last_cust["col"] + config["step"] if last_cust else config["start_col"]
+                    last_cust_col = last_cust["col"] if last_cust else config["start_col"] - config["step"]
+                    next_dest_col = last_cust_col + config["step"]
 
                     if last_cust:
                         st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust['label']}` (คอลัมน์ถัดไปที่จะกรอก: **{get_column_letter(next_dest_col)}**)")
                     else:
                         st.info("📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า**")
 
-                    cust_id_set = {e["id"] for e in cust_entries}
-                    cust_sig_set = {e["full_sig"] for e in cust_entries}
-                    available_to_select = []
-
-                    if last_cust:
-                        match_indices = [
-                            i for i, e in enumerate(raw_entries)
-                            if e["full_sig"] == last_cust["full_sig"] or e["id"] == last_cust["id"]
-                        ]
-                        if match_indices:
-                            available_to_select = raw_entries[match_indices[-1] + 1:]
-                        else:
-                            available_to_select = [
-                                e for e in raw_entries
-                                if e["full_sig"] not in cust_sig_set and e["id"] not in cust_id_set
-                            ]
-                    else:
-                        available_to_select = raw_entries
+                    # สแกนไฟล์ดิบ โดยบอกให้เริ่มหาจากคอลัมน์ต่อจากไฟล์ลูกค้า (last_cust_col)
+                    available_to_select = scan_entries(ws_r, ws_c, config, check_spec=True, is_raw=True, last_cust_col_idx=last_cust_col)
 
                     if not available_to_select:
                         st.success("✅ ข้อมูลในชีทนี้ส่งครบถ้วนแล้ว")
