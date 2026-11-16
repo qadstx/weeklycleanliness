@@ -26,37 +26,44 @@ def expand_ranges(ranges_list):
 def extract_ww_num(text):
     if not text:
         return None
-    match = re.search(r'WW\.?\s*(\d+)', str(text), re.IGNORECASE)
+    match = re.search(r'WW\.?\s*0*(\d+)', str(text), re.IGNORECASE)
     return int(match.group(1)) if match else None
 
 def extract_date_val(val):
     if val is None:
         return None
-    if isinstance(val, (datetime.datetime, datetime.date)):
-        return val.date() if isinstance(val, datetime.datetime) else val
-    # กรณีเป็นตัวเลข Serial Date ของ Excel (เช่น 46300)
+    if isinstance(val, datetime.datetime):
+        return val.date()
+    if isinstance(val, datetime.date):
+        return val
     if isinstance(val, (int, float)):
-        if 40000 < val < 50000:
+        if 40000 < val < 55000:
             return (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(val))).date()
-            
+
     s = str(val).strip()
-    if not s or len(s) < 5:
+    if not s or len(s) < 4:
         return None
+
     date_formats = [
-        "%d-%b-%y", "%d-%b-%Y", "%d/%b/%y", "%d/%b/%Y",
+        "%d-%b-%y", "%d-%b-%Y", "%d/%b/%y", "%d/%b/%Y", "%d %b %y", "%d %b %Y",
         "%d-%m-%y", "%d-%m-%Y", "%d/%m/%y", "%d/%m/%Y",
-        "%Y-%m-%d", "%Y/%m/%d", "%b-%y", "%b %y"
+        "%Y-%m-%d", "%Y/%m/%d", "%b-%y", "%b %y", "%b-%Y", "%B-%y"
     ]
     for fmt in date_formats:
         try:
-            return datetime.datetime.strptime(s, fmt).date()
+            d = datetime.datetime.strptime(s, fmt).date()
+            # กรณีเป็นเดือน-ปี เช่น Oct-26 ให้ตั้งเป็นวันที่ 1 ของเดือนนั้นเพื่อใช้เปรียบเทียบได้
+            return d
         except ValueError:
             pass
-    m = re.search(r'(\d{1,2}[-/][A-Za-z]{3}[-/]\d{2,4})', s)
+
+    # ค้นหารูปแบบวันที่ เช่น 14-Oct-26 หรือ 14/10/2026 ที่ปนอยู่ในข้อความ
+    m = re.search(r'(\d{1,2}[\-/ swaps][A-Za-z]{3}[\-/ swaps]\d{2,4})', s)
     if m:
+        clean_d = re.sub(r'\s+', '-', m.group(1))
         for fmt in ["%d-%b-%y", "%d-%b-%Y", "%d/%b/%y", "%d/%b/%Y"]:
             try:
-                return datetime.datetime.strptime(m.group(1), fmt).date()
+                return datetime.datetime.strptime(clean_d, fmt).date()
             except ValueError:
                 pass
     return None
@@ -188,7 +195,7 @@ MODEL_PROFILES = {
             "spec_checks": [(39, 40), (45, 46), (51, 52)]
         },
         "Ghost Test": {
-            "step": 1, "header_rows": [10, 11, 12], "start_col": 2,
+            "step": 1, "header_rows": [10, 11], "start_col": 2,
             "copy_rows": expand_ranges([(10, 13)]),
             "spec_checks": []
         }
@@ -262,7 +269,7 @@ def normalize_filename(name):
     return re.sub(r'[\s_\-]+', '', s)
 
 # ==========================================
-# Helper Functions สำหรับอ่านและคัดลอกข้อมูล
+# Helper Functions สำหรับอ่านและตรวจสอบข้อมูลจริง
 # ==========================================
 def format_val(val):
     if val is None:
@@ -270,7 +277,7 @@ def format_val(val):
     if isinstance(val, (datetime.datetime, datetime.date)):
         return val.strftime("%d-%b-%y")
     if isinstance(val, (int, float)):
-        if 40000 < val < 50000:
+        if 40000 < val < 55000:
             d = (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(val))).date()
             return d.strftime("%d-%b-%y")
     return str(val).strip()
@@ -282,6 +289,8 @@ def to_float(val):
         return float(val)
     s = str(val).strip().replace(",", "")
     if s == "" or s.upper() in ["NA", "N/A", "ND", "-", "PASS", "FAIL"]:
+        return None
+    if s.startswith("#"): # ข้าม Error ของสูตร เช่น #DIV/0!, #VALUE!
         return None
     try:
         return float(s)
@@ -319,90 +328,179 @@ def is_valid_header_token(val):
     if val is None:
         return False
     s = str(val).strip()
-    if s == "" or s.startswith("="):
+    if s == "" or s.startswith("=") or s.startswith("#"):
         return False
     ignore_list = [
         "WW.", "WW", "DATE", "ION", "SPEC.", "SPEC", "NG/CM2", "NG/CM²",
-        "SILICONE", "HYDROCARBON", "MOLD", "REMARK", "PASS", "FAIL", "ND"
+        "SILICONE", "HYDROCARBON", "MOLD", "REMARK", "PASS", "FAIL", "ND",
+        "PART NAME", "MATERIAL", "PART NO.", "PART NO"
     ]
     return s.upper() not in ignore_list
+
+def get_data_rows(config):
+    """แยกเฉพาะแถวที่เป็นตัวเลขผลลัพธ์ (ไม่เอาแถวหัวตาราง) เพื่อเช็คว่าคอลัมน์นั้นกรอกข้อมูลแล้วหรือยัง"""
+    h_set = set(config["header_rows"])
+    d_rows = [r for r in config["copy_rows"] if r not in h_set]
+    return d_rows if d_rows else config["copy_rows"]
+
+def column_has_actual_measurement(ws, col, config):
+    """
+    เช็คว่าคอลัมน์นั้นมีการกรอก 'ข้อมูลผลเทสจริง' แล้วหรือยัง
+    (ป้องกันปัญหาหัวตารางพิมพ์ Part No. / WW. ลากยาวรอไว้ในคอลัมน์ว่าง)
+    """
+    data_rows = get_data_rows(config)
+    step = config["step"]
+
+    for r in data_rows:
+        for offset in range(step):
+            val = ws.cell(row=r, column=col + offset).value
+            if val is None:
+                continue
+            s = str(val).strip()
+            # ข้ามช่องว่าง สูตรที่ยังไม่คำนวณ หรือ #DIV/0!
+            if s == "" or s.startswith("=") or s.startswith("#"):
+                continue
+            # ถ้ามีตัวเลขผลเทส หรือมีผลตรวจ Ghost Test (ND / PASS / No "Ghost") แปลว่ากรอกข้อมูลจริงแล้ว
+            if to_float(val) is not None:
+                return True
+            if s.upper() in ["ND", "PASS", "FAIL"] or "GHOST" in s.upper():
+                return True
+    return False
+
+def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
+    """สแกนเฉพาะคอลัมน์ที่มีผลเทสจริง พร้อมจำค่า วันที่ / WW ล่าสุด และสร้างข้อมูลเปรียบเทียบ"""
+    entries = []
+    header_rows = config["header_rows"]
+    data_rows = get_data_rows(config)
+    step = config["step"]
+    col = config["start_col"]
+    max_col = ws_target.max_column
+
+    last_seen_ww = None
+    last_seen_date = None
+
+    while col <= max_col:
+        # อัปเดต WW และ Date จากหัวตาราง (เผื่อกรณี Merge เซลล์จากคอลัมน์ก่อนหน้า)
+        col_ww = None
+        col_date = None
+        tokens = []
+
+        # กวาดหาวันที่และ WW ในแถวหัวตาราง (และแถวใกล้เคียงเผื่อโมเดลที่มี Date อยู่แถวบนสุดของตาราง)
+        search_rows = sorted(list(set(header_rows + [min(header_rows) - 1, min(header_rows) + 1])))
+        for r in search_rows:
+            if r < 1:
+                continue
+            for offset in range(step):
+                raw_v = ws_target.cell(row=r, column=col + offset).value
+                if raw_v is not None:
+                    if col_ww is None:
+                        col_ww = extract_ww_num(str(raw_v))
+                    if col_date is None:
+                        col_date = extract_date_val(raw_v)
+                    if r in header_rows and offset == 0 and is_valid_header_token(raw_v):
+                        s_val = format_val(raw_v)
+                        if s_val and s_val not in tokens:
+                            tokens.append(s_val)
+
+        # เช็คว่าคอลัมน์นี้มีการกรอกผลเทสจริงหรือไม่
+        if column_has_actual_measurement(ws_target, col, config):
+            if col_ww is not None:
+                last_seen_ww = col_ww
+            else:
+                col_ww = last_seen_ww
+
+            if col_date is not None:
+                last_seen_date = col_date
+            else:
+                col_date = last_seen_date
+
+            # สร้างลายเซ็นของค่าตัวเลข (Data Signature) เพื่อใช้เทียบหาคอลัมน์เดียวกันระหว่าง 2 ไฟล์ได้อย่างแม่นยำ
+            data_vals = []
+            for r in data_rows[:6]:
+                for offset in range(step):
+                    v = ws_target.cell(row=r, column=col + offset).value
+                    fv = to_float(v)
+                    if fv is not None:
+                        data_vals.append(f"{fv:.4f}")
+                    elif v is not None and not str(v).startswith("#"):
+                        data_vals.append(str(v).strip())
+            data_sig = "|".join(data_vals)
+
+            full_sig = " | ".join(tokens) if tokens else f"Col {get_column_letter(col)}"
+            failures = evaluate_entry_spec(ws_target, ws_cust_ref, col, config) if check_spec else []
+
+            date_str = col_date.strftime("%d-%b-%y") if col_date else "ไม่ระบุวันที่"
+            ww_str = f"WW{col_ww:02d} | " if col_ww is not None else ""
+            base_label = f"[Col {get_column_letter(col)} | {ww_str}{date_str}] {full_sig}"
+
+            entries.append({
+                "col": col,
+                "tokens": tokens,
+                "full_sig": full_sig,
+                "data_sig": data_sig,
+                "label": f"⚠️ {base_label} — หลุด Spec: {', '.join(failures)}" if failures else f"✅ {base_label}",
+                "is_ng": len(failures) > 0,
+                "failures": failures,
+                "ww_num": col_ww,
+                "date_val": col_date
+            })
+            col += step
+        else:
+            col += 1
+
+    return entries
+
+def filter_new_raw_entries(cust_entries, raw_entries):
+    """
+    หาชุดข้อมูลในไฟล์ดิบที่ยังไม่ได้ส่งให้ลูกค้า:
+    1. เช็คหาคอลัมน์สุดท้ายของไฟล์ลูกค้าว่าตรงกับคอลัมน์ไหนในไฟล์ดิบ (เทียบจากค่าตัวเลขผลเทส + ชื่อ Lot/วันที่)
+    2. ถ้าเจอ ให้ดึงทุกคอลัมน์หลังจากนั้นในไฟล์ดิบมาทั้งหมด
+    3. ถ้าไม่เจอ ให้ใช้วันที่ล่าสุดของไฟล์ลูกค้าเป็นตัวตัด (ดึงเฉพาะวันที่ > วันที่ล่าสุดในไฟล์ลูกค้า)
+    """
+    if not cust_entries:
+        return raw_entries
+    if not raw_entries:
+        return []
+
+    last_c = cust_entries[-1]
+
+    # 1. เทียบด้วย Data Signature (แม่นยำที่สุดแม้หัวตารางเขียนไม่เหมือนกัน)ควบคู่กับ Token
+    match_indices = []
+    for i, r_ent in enumerate(raw_entries):
+        # ถ้าค่าตัวเลขผลเทสตรงกันเป๊ะ และมีข้อมูลจริง
+        if last_c["data_sig"] and r_ent["data_sig"] == last_c["data_sig"]:
+            match_indices.append(i)
+        # หรือถ้ามีชื่อ Lot (เช่น HNRJ...) ตรงกัน
+        elif any(t in r_ent["tokens"] for t in last_c["tokens"] if len(t) >= 7 and not t.startswith("Mat ") and not t.startswith("D76")):
+            match_indices.append(i)
+
+    if match_indices:
+        cutoff_idx = match_indices[-1]
+        return raw_entries[cutoff_idx + 1:]
+
+    # 2. ถ้าหาไม่เจอจากค่าตัวเลข ให้เทียบจาก "วันที่ล่าสุดที่อัปเดตในไฟล์ลูกค้า"
+    if last_c["date_val"] is not None:
+        newer_by_date = [r for r in raw_entries if r["date_val"] is not None and r["date_val"] > last_c["date_val"]]
+        if newer_by_date:
+            return newer_by_date
+
+    # 3. ถ้าไม่มีวันที่ ให้เทียบจาก "WW ล่าสุดในไฟล์ลูกค้า"
+    if last_c["ww_num"] is not None:
+        newer_by_ww = [r for r in raw_entries if r["ww_num"] is not None and r["ww_num"] > last_c["ww_num"]]
+        if newer_by_ww:
+            return newer_by_ww
+
+    # 4. Fallback สุดท้าย: เทียบตามจำนวนชุดข้อมูลที่ส่งไปแล้ว
+    if len(raw_entries) > len(cust_entries):
+        return raw_entries[len(cust_entries):]
+
+    return []
 
 def get_merged_width(ws, row, col):
     for m in ws.merged_cells.ranges:
         if m.min_row <= row <= m.max_row and m.min_col <= col <= m.max_col:
             return m.max_col - m.min_col + 1
     return 1
-
-def scan_entries(ws_target, ws_cust_ref, config, check_spec=False, is_raw=False, last_cust_col_idx=None):
-    """สแกนและดึงวันที่แบบ Forward Fill เพื่อแก้ปัญหาวันที่เว้นว่างในคอลัมน์ใหม่"""
-    entries = []
-    header_rows = config["header_rows"]
-    step = config["step"]
-    
-    # สแกนตั้งแต่ต้นไฟล์เสมอ เพื่อเก็บประวัติ WW และวันที่
-    col = config["start_col"]
-    max_col = ws_target.max_column
-    
-    last_seen_ww = None
-    last_seen_date = None
-
-    while col <= max_col:
-        tokens = []
-        ww_num = None
-        entry_date = None
-        has_data = False
-
-        for r in header_rows + config["copy_rows"][:3]: 
-            raw_v = ws_target.cell(row=r, column=col).value
-            if is_valid_header_token(raw_v) or to_float(raw_v) is not None:
-                has_data = True
-                if r in header_rows:
-                    s_val = format_val(raw_v)
-                    if s_val and s_val not in tokens:
-                        tokens.append(s_val)
-                    if ww_num is None:
-                        ww_num = extract_ww_num(s_val)
-                    if entry_date is None:
-                        entry_date = extract_date_val(raw_v)
-
-        # ถ้าระบุ WW หรือวันที่ได้ ให้จำเป็นค่าล่าสุดไว้
-        if ww_num is not None:
-            last_seen_ww = ww_num
-        else:
-            ww_num = last_seen_ww
-            
-        if entry_date is not None:
-            last_seen_date = entry_date
-        else:
-            entry_date = last_seen_date
-
-        if has_data:
-            # ถ้าเป็นไฟล์ดิบ จะคืนค่าเฉพาะคอลัมน์ที่เกินกว่าไฟล์ลูกค้าแล้วเท่านั้น
-            if not (is_raw and last_cust_col_idx and col <= last_cust_col_idx):
-                primary_id = tokens[-1] if tokens else f"Data_Col_{get_column_letter(col)}"
-                full_sig = " | ".join(tokens) if tokens else f"Data_Col_{get_column_letter(col)}"
-
-                failures = evaluate_entry_spec(ws_target, ws_cust_ref, col, config) if check_spec else []
-                
-                # โชว์วันที่และ WW ที่จับได้ เพื่อให้ User มั่นใจว่าอ่านมาถูกจริงๆ
-                date_str = last_seen_date.strftime("%d-%b-%y") if last_seen_date else "No Date"
-                ww_str = f"WW{last_seen_ww} | " if last_seen_ww else ""
-                
-                base_label = f"[Col {get_column_letter(col)} | {ww_str}{date_str}] {full_sig}"
-
-                entries.append({
-                    "col": col,
-                    "id": primary_id,
-                    "full_sig": full_sig,
-                    "label": f"⚠️ {base_label} — หลุด Spec: {', '.join(failures)}" if failures else f"✅ {base_label}",
-                    "is_ng": len(failures) > 0,
-                    "failures": failures,
-                    "ww_num": ww_num,
-                    "date_val": entry_date
-                })
-        col += step
-        
-    return entries
 
 def copy_cell_exact(src_cell, dst_cell, protect_formulas=True):
     if protect_formulas and isinstance(dst_cell.value, str) and dst_cell.value.startswith("="):
@@ -520,7 +618,7 @@ if cust_zip_upload and raw_zip_upload:
     for file_idx, (c_name, r_name) in enumerate(paired_models):
         profile_name, model_cfg = detect_model_profile(c_name)
         pair_title = f"📦 โมเดล: {c_name}  —  [ใช้โปรไฟล์แถว: {profile_name}]"
-        
+
         with st.expander(pair_title, expanded=(file_idx == 0)):
             wb_cust_scan = openpyxl.load_workbook(io.BytesIO(cust_files_map[c_name]), data_only=True)
             wb_raw_scan = openpyxl.load_workbook(io.BytesIO(raw_files_map[r_name]), data_only=True)
@@ -539,20 +637,20 @@ if cust_zip_upload and raw_zip_upload:
                         st.warning(f"⚠️ ไม่พบชีท **{sheet_key}** ในโมเดลนี้")
                         continue
 
-                    # สแกนไฟล์ลูกค้า เพื่อหาคอลัมน์สุดท้าย
-                    cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False, is_raw=False)
-                    
+                    # 1. สแกนเฉพาะคอลัมน์ที่มีผลเทสจริงในไฟล์ลูกค้าและไฟล์ดิบ
+                    cust_entries = scan_all_valid_entries(ws_c, ws_c, config, check_spec=False)
+                    raw_entries = scan_all_valid_entries(ws_r, ws_c, config, check_spec=True)
+
                     last_cust = cust_entries[-1] if cust_entries else None
-                    last_cust_col = last_cust["col"] if last_cust else config["start_col"] - config["step"]
-                    next_dest_col = last_cust_col + config["step"]
+                    next_dest_col = last_cust["col"] + config["step"] if last_cust else config["start_col"]
 
                     if last_cust:
                         st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust['label']}` (คอลัมน์ถัดไปที่จะกรอก: **{get_column_letter(next_dest_col)}**)")
                     else:
-                        st.info("📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า**")
+                        st.info(f"📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า** (จะเริ่มกรอกที่คอลัมน์ **{get_column_letter(next_dest_col)}**)")
 
-                    # สแกนไฟล์ดิบ โดยให้แจ้งจุดที่เกินไฟล์ลูกค้าแล้ว
-                    available_to_select = scan_entries(ws_r, ws_c, config, check_spec=True, is_raw=True, last_cust_col_idx=last_cust_col)
+                    # 2. กรองเฉพาะข้อมูลในไฟล์ดิบที่ยังไม่อัปเดตลงไฟล์ลูกค้า
+                    available_to_select = filter_new_raw_entries(cust_entries, raw_entries)
 
                     if not available_to_select:
                         st.success("✅ ข้อมูลในชีทนี้ส่งครบถ้วนแล้ว")
@@ -560,9 +658,7 @@ if cust_zip_upload and raw_zip_upload:
                     else:
                         sheet_selections = []
                         for entry in available_to_select:
-                            
-                            # ลอจิกการตัดรอบ:
-                            # "อันไหนไม่มี ww ยึดวันที่" -> ถ้าเจอ WW ให้ใช้ WW, ถ้าไม่มี WW ให้ใช้วันที่แทน
+                            # เงื่อนไขตัดรอบ: ถ้ามี WW ให้เช็ค WW, ถ้าไม่มี WW ให้เช็ควันที่
                             within_cutoff = True
                             if entry["ww_num"] is not None and target_ww_num is not None:
                                 within_cutoff = (entry["ww_num"] <= target_ww_num)
