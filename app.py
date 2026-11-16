@@ -12,7 +12,7 @@ st.set_page_config(page_title="Customer Data Batch Auto-Filler", layout="wide")
 st.title("📦 ระบบเติมข้อมูลส่งลูกค้าอัตโนมัติ (แยกตามโมเดล + กรอง WW และวันที่)")
 
 # ==========================================
-# ฟังก์ชันแปลงช่วงแถว และสกัด WW / วันที่
+# ฟังก์ชันแปลงช่วงแถว และสกัด WW / วันที่ / Lab ID
 # ==========================================
 def expand_ranges(ranges_list):
     rows = []
@@ -29,6 +29,17 @@ def extract_ww_num(text):
     match = re.search(r'WW\.?\s*0*(\d+)', str(text), re.IGNORECASE)
     return int(match.group(1)) if match else None
 
+def extract_unique_lot_or_lab_id(text):
+    """ดึงเฉพาะรหัส Lab No. หรือ Lot No. ที่ไม่ซ้ำกัน (เช่น LAB26001868, HNRJ1106A1)"""
+    if not text:
+        return None
+    s = str(text).strip()
+    # ค้นหารหัส LAB... หรือ HNRJ...
+    m = re.search(r'(LAB\d{6,}|HNRJ\w+)', s, re.IGNORECASE)
+    if m:
+        return m.group(1).upper()
+    return None
+
 def extract_date_val(val):
     if val is None:
         return None
@@ -44,6 +55,17 @@ def extract_date_val(val):
     if not s or len(s) < 4:
         return None
 
+    # ค้นหาวันที่ในข้อความยาวๆ เช่น "washing date 15 Oct'26" หรือ "14-Oct-26"
+    m = re.search(r'(\d{1,2})[\-\/\s]+([A-Za-z]{3})[\-\/\s\']*(\d{2,4})', s)
+    if m:
+        day, mon, yr = m.group(1), m.group(2), m.group(3)
+        clean_d = f"{day}-{mon}-{yr}"
+        for fmt in ["%d-%b-%y", "%d-%b-%Y"]:
+            try:
+                return datetime.datetime.strptime(clean_d, fmt).date()
+            except ValueError:
+                pass
+
     date_formats = [
         "%d-%b-%y", "%d-%b-%Y", "%d/%b/%y", "%d/%b/%Y", "%d %b %y", "%d %b %Y",
         "%d-%m-%y", "%d-%m-%Y", "%d/%m/%y", "%d/%m/%Y",
@@ -51,21 +73,9 @@ def extract_date_val(val):
     ]
     for fmt in date_formats:
         try:
-            d = datetime.datetime.strptime(s, fmt).date()
-            # กรณีเป็นเดือน-ปี เช่น Oct-26 ให้ตั้งเป็นวันที่ 1 ของเดือนนั้นเพื่อใช้เปรียบเทียบได้
-            return d
+            return datetime.datetime.strptime(s, fmt).date()
         except ValueError:
             pass
-
-    # ค้นหารูปแบบวันที่ เช่น 14-Oct-26 หรือ 14/10/2026 ที่ปนอยู่ในข้อความ
-    m = re.search(r'(\d{1,2}[\-/ swaps][A-Za-z]{3}[\-/ swaps]\d{2,4})', s)
-    if m:
-        clean_d = re.sub(r'\s+', '-', m.group(1))
-        for fmt in ["%d-%b-%y", "%d-%b-%Y", "%d/%b/%y", "%d/%b/%Y"]:
-            try:
-                return datetime.datetime.strptime(clean_d, fmt).date()
-            except ValueError:
-                pass
     return None
 
 # ==========================================
@@ -280,7 +290,7 @@ def format_val(val):
         if 40000 < val < 55000:
             d = (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(val))).date()
             return d.strftime("%d-%b-%y")
-    return str(val).strip()
+    return re.sub(r'\s+', ' ', str(val).strip())
 
 def to_float(val):
     if val is None:
@@ -290,7 +300,7 @@ def to_float(val):
     s = str(val).strip().replace(",", "")
     if s == "" or s.upper() in ["NA", "N/A", "ND", "-", "PASS", "FAIL"]:
         return None
-    if s.startswith("#"): # ข้าม Error ของสูตร เช่น #DIV/0!, #VALUE!
+    if s.startswith("#"):
         return None
     try:
         return float(s)
@@ -333,21 +343,16 @@ def is_valid_header_token(val):
     ignore_list = [
         "WW.", "WW", "DATE", "ION", "SPEC.", "SPEC", "NG/CM2", "NG/CM²",
         "SILICONE", "HYDROCARBON", "MOLD", "REMARK", "PASS", "FAIL", "ND",
-        "PART NAME", "MATERIAL", "PART NO.", "PART NO"
+        "PART NAME", "MATERIAL", "PART NO.", "PART NO", "OUTGASSED COMPOUNDS"
     ]
     return s.upper() not in ignore_list
 
 def get_data_rows(config):
-    """แยกเฉพาะแถวที่เป็นตัวเลขผลลัพธ์ (ไม่เอาแถวหัวตาราง) เพื่อเช็คว่าคอลัมน์นั้นกรอกข้อมูลแล้วหรือยัง"""
     h_set = set(config["header_rows"])
     d_rows = [r for r in config["copy_rows"] if r not in h_set]
     return d_rows if d_rows else config["copy_rows"]
 
 def column_has_actual_measurement(ws, col, config):
-    """
-    เช็คว่าคอลัมน์นั้นมีการกรอก 'ข้อมูลผลเทสจริง' แล้วหรือยัง
-    (ป้องกันปัญหาหัวตารางพิมพ์ Part No. / WW. ลากยาวรอไว้ในคอลัมน์ว่าง)
-    """
     data_rows = get_data_rows(config)
     step = config["step"]
 
@@ -357,10 +362,8 @@ def column_has_actual_measurement(ws, col, config):
             if val is None:
                 continue
             s = str(val).strip()
-            # ข้ามช่องว่าง สูตรที่ยังไม่คำนวณ หรือ #DIV/0!
             if s == "" or s.startswith("=") or s.startswith("#"):
                 continue
-            # ถ้ามีตัวเลขผลเทส หรือมีผลตรวจ Ghost Test (ND / PASS / No "Ghost") แปลว่ากรอกข้อมูลจริงแล้ว
             if to_float(val) is not None:
                 return True
             if s.upper() in ["ND", "PASS", "FAIL"] or "GHOST" in s.upper():
@@ -368,7 +371,6 @@ def column_has_actual_measurement(ws, col, config):
     return False
 
 def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
-    """สแกนเฉพาะคอลัมน์ที่มีผลเทสจริง พร้อมจำค่า วันที่ / WW ล่าสุด และสร้างข้อมูลเปรียบเทียบ"""
     entries = []
     header_rows = config["header_rows"]
     data_rows = get_data_rows(config)
@@ -380,29 +382,34 @@ def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
     last_seen_date = None
 
     while col <= max_col:
-        # อัปเดต WW และ Date จากหัวตาราง (เผื่อกรณี Merge เซลล์จากคอลัมน์ก่อนหน้า)
         col_ww = None
         col_date = None
+        unique_id = None
         tokens = []
 
-        # กวาดหาวันที่และ WW ในแถวหัวตาราง (และแถวใกล้เคียงเผื่อโมเดลที่มี Date อยู่แถวบนสุดของตาราง)
-        search_rows = sorted(list(set(header_rows + [min(header_rows) - 1, min(header_rows) + 1])))
+        # กวาดหาวันที่, WW, และรหัส LAB/Lot ในแถวหัวตาราง
+        search_rows = sorted(list(set(header_rows + [min(header_rows) - 1, max(header_rows) + 1])))
         for r in search_rows:
             if r < 1:
                 continue
             for offset in range(step):
                 raw_v = ws_target.cell(row=r, column=col + offset).value
                 if raw_v is not None:
+                    s_raw = str(raw_v)
                     if col_ww is None:
-                        col_ww = extract_ww_num(str(raw_v))
-                    if col_date is None:
-                        col_date = extract_date_val(raw_v)
+                        col_ww = extract_ww_num(s_raw)
+                    # ให้ความสำคัญกับวันที่จากแถวหัวตารางโดยตรง
+                    d_extracted = extract_date_val(raw_v)
+                    if d_extracted is not None:
+                        col_date = d_extracted
+                    if unique_id is None:
+                        unique_id = extract_unique_lot_or_lab_id(s_raw)
+
                     if r in header_rows and offset == 0 and is_valid_header_token(raw_v):
                         s_val = format_val(raw_v)
                         if s_val and s_val not in tokens:
                             tokens.append(s_val)
 
-        # เช็คว่าคอลัมน์นี้มีการกรอกผลเทสจริงหรือไม่
         if column_has_actual_measurement(ws_target, col, config):
             if col_ww is not None:
                 last_seen_ww = col_ww
@@ -414,16 +421,16 @@ def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
             else:
                 col_date = last_seen_date
 
-            # สร้างลายเซ็นของค่าตัวเลข (Data Signature) เพื่อใช้เทียบหาคอลัมน์เดียวกันระหว่าง 2 ไฟล์ได้อย่างแม่นยำ
+            # สร้างลายเซ็นจากตัวเลขผลเทสทั้งหมดในคอลัมน์นั้น (ไม่จำกัดแค่ 6 แถวแรก เพื่อให้ APA/DHS แม่นยำ 100%)
             data_vals = []
-            for r in data_rows[:6]:
+            for r in data_rows:
                 for offset in range(step):
                     v = ws_target.cell(row=r, column=col + offset).value
                     fv = to_float(v)
                     if fv is not None:
-                        data_vals.append(f"{fv:.4f}")
-                    elif v is not None and not str(v).startswith("#"):
-                        data_vals.append(str(v).strip())
+                        data_vals.append(f"{r}_{offset}:{fv:.4f}")
+                    elif v is not None and not str(v).startswith("#") and str(v).strip() != "":
+                        data_vals.append(f"{r}_{offset}:{str(v).strip()}")
             data_sig = "|".join(data_vals)
 
             full_sig = " | ".join(tokens) if tokens else f"Col {get_column_letter(col)}"
@@ -435,6 +442,7 @@ def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
 
             entries.append({
                 "col": col,
+                "unique_id": unique_id,
                 "tokens": tokens,
                 "full_sig": full_sig,
                 "data_sig": data_sig,
@@ -452,10 +460,9 @@ def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
 
 def filter_new_raw_entries(cust_entries, raw_entries):
     """
-    หาชุดข้อมูลในไฟล์ดิบที่ยังไม่ได้ส่งให้ลูกค้า:
-    1. เช็คหาคอลัมน์สุดท้ายของไฟล์ลูกค้าว่าตรงกับคอลัมน์ไหนในไฟล์ดิบ (เทียบจากค่าตัวเลขผลเทส + ชื่อ Lot/วันที่)
-    2. ถ้าเจอ ให้ดึงทุกคอลัมน์หลังจากนั้นในไฟล์ดิบมาทั้งหมด
-    3. ถ้าไม่เจอ ให้ใช้วันที่ล่าสุดของไฟล์ลูกค้าเป็นตัวตัด (ดึงเฉพาะวันที่ > วันที่ล่าสุดในไฟล์ลูกค้า)
+    หาชุดข้อมูลในไฟล์ดิบที่ยังไม่ได้ส่งให้ลูกค้า (แก้ไขบั๊กชื่อโมเดลซ้ำกันทุกคอลัมน์):
+    1. เช็คจากรหัส Unique ID (เช่น LAB26001868 หรือ HNRJ1106A1) หรือ ค่าตัวเลขผลเทสทั้งหมด (data_sig)
+    2. ดึงทุกคอลัมน์ในไฟล์ดิบที่อยู่ถัดจากตัวสุดท้ายของไฟล์ลูกค้าเป็นต้นไป
     """
     if not cust_entries:
         return raw_entries
@@ -464,33 +471,27 @@ def filter_new_raw_entries(cust_entries, raw_entries):
 
     last_c = cust_entries[-1]
 
-    # 1. เทียบด้วย Data Signature (แม่นยำที่สุดแม้หัวตารางเขียนไม่เหมือนกัน)ควบคู่กับ Token
+    # 1. เช็คหาตำแหน่งคอลัมน์ในไฟล์ดิบที่ตรงกับตัวสุดท้ายของไฟล์ลูกค้า
     match_indices = []
     for i, r_ent in enumerate(raw_entries):
-        # ถ้าค่าตัวเลขผลเทสตรงกันเป๊ะ และมีข้อมูลจริง
-        if last_c["data_sig"] and r_ent["data_sig"] == last_c["data_sig"]:
+        # ถ้ารหัส LAB / HNRJ ตรงกันเป๊ะ
+        if last_c["unique_id"] and r_ent["unique_id"] and last_c["unique_id"] == r_ent["unique_id"]:
             match_indices.append(i)
-        # หรือถ้ามีชื่อ Lot (เช่น HNRJ...) ตรงกัน
-        elif any(t in r_ent["tokens"] for t in last_c["tokens"] if len(t) >= 7 and not t.startswith("Mat ") and not t.startswith("D76")):
+        # หรือถ้าชุดตัวเลขผลเทสทั้งหมดในคอลัมน์ตรงกันเป๊ะ
+        elif last_c["data_sig"] and r_ent["data_sig"] == last_c["data_sig"]:
             match_indices.append(i)
 
     if match_indices:
         cutoff_idx = match_indices[-1]
         return raw_entries[cutoff_idx + 1:]
 
-    # 2. ถ้าหาไม่เจอจากค่าตัวเลข ให้เทียบจาก "วันที่ล่าสุดที่อัปเดตในไฟล์ลูกค้า"
+    # 2. ถ้าหาตัวสุดท้ายไม่เจอในไฟล์ดิบ ให้ดึงทุกคอลัมน์ที่มีวันที่ใหม่กว่าไฟล์ลูกค้า
     if last_c["date_val"] is not None:
         newer_by_date = [r for r in raw_entries if r["date_val"] is not None and r["date_val"] > last_c["date_val"]]
         if newer_by_date:
             return newer_by_date
 
-    # 3. ถ้าไม่มีวันที่ ให้เทียบจาก "WW ล่าสุดในไฟล์ลูกค้า"
-    if last_c["ww_num"] is not None:
-        newer_by_ww = [r for r in raw_entries if r["ww_num"] is not None and r["ww_num"] > last_c["ww_num"]]
-        if newer_by_ww:
-            return newer_by_ww
-
-    # 4. Fallback สุดท้าย: เทียบตามจำนวนชุดข้อมูลที่ส่งไปแล้ว
+    # 3. หรือดึงตามจำนวนคอลัมน์ที่เกินมาจากไฟล์ลูกค้า
     if len(raw_entries) > len(cust_entries):
         return raw_entries[len(cust_entries):]
 
@@ -637,7 +638,6 @@ if cust_zip_upload and raw_zip_upload:
                         st.warning(f"⚠️ ไม่พบชีท **{sheet_key}** ในโมเดลนี้")
                         continue
 
-                    # 1. สแกนเฉพาะคอลัมน์ที่มีผลเทสจริงในไฟล์ลูกค้าและไฟล์ดิบ
                     cust_entries = scan_all_valid_entries(ws_c, ws_c, config, check_spec=False)
                     raw_entries = scan_all_valid_entries(ws_r, ws_c, config, check_spec=True)
 
@@ -649,7 +649,6 @@ if cust_zip_upload and raw_zip_upload:
                     else:
                         st.info(f"📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า** (จะเริ่มกรอกที่คอลัมน์ **{get_column_letter(next_dest_col)}**)")
 
-                    # 2. กรองเฉพาะข้อมูลในไฟล์ดิบที่ยังไม่อัปเดตลงไฟล์ลูกค้า
                     available_to_select = filter_new_raw_entries(cust_entries, raw_entries)
 
                     if not available_to_select:
