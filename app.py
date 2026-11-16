@@ -32,10 +32,13 @@ def extract_ww_num(text):
 def extract_date_val(val):
     if val is None:
         return None
-    if isinstance(val, datetime.datetime):
-        return val.date()
-    if isinstance(val, datetime.date):
-        return val
+    if isinstance(val, (datetime.datetime, datetime.date)):
+        return val.date() if isinstance(val, datetime.datetime) else val
+    # กรณีเป็นตัวเลข Serial Date ของ Excel (เช่น 46300)
+    if isinstance(val, (int, float)):
+        if 40000 < val < 50000:
+            return (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(val))).date()
+            
     s = str(val).strip()
     if not s or len(s) < 5:
         return None
@@ -266,6 +269,10 @@ def format_val(val):
         return ""
     if isinstance(val, (datetime.datetime, datetime.date)):
         return val.strftime("%d-%b-%y")
+    if isinstance(val, (int, float)):
+        if 40000 < val < 50000:
+            d = (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(val))).date()
+            return d.strftime("%d-%b-%y")
     return str(val).strip()
 
 def to_float(val):
@@ -327,16 +334,17 @@ def get_merged_width(ws, row, col):
     return 1
 
 def scan_entries(ws_target, ws_cust_ref, config, check_spec=False, is_raw=False, last_cust_col_idx=None):
-    """
-    สแกนข้อมูลโดยใช้ตำแหน่งคอลัมน์เป็นจุดตัดแทนการเทียบชื่อ
-    ถ้าเป็นไฟล์ดิบ (is_raw) จะเริ่มหาจากคอลัมน์ถัดจากไฟล์ลูกค้าเสมอ
-    """
+    """สแกนและดึงวันที่แบบ Forward Fill เพื่อแก้ปัญหาวันที่เว้นว่างในคอลัมน์ใหม่"""
     entries = []
     header_rows = config["header_rows"]
     step = config["step"]
     
-    col = last_cust_col_idx + step if (is_raw and last_cust_col_idx) else config["start_col"]
+    # สแกนตั้งแต่ต้นไฟล์เสมอ เพื่อเก็บประวัติ WW และวันที่
+    col = config["start_col"]
     max_col = ws_target.max_column
+    
+    last_seen_ww = None
+    last_seen_date = None
 
     while col <= max_col:
         tokens = []
@@ -344,7 +352,6 @@ def scan_entries(ws_target, ws_cust_ref, config, check_spec=False, is_raw=False,
         entry_date = None
         has_data = False
 
-        # ตรวจสอบว่าคอลัมน์นี้มีข้อมูลจริงไหม เช็คทั้งแถวหัวและข้อมูล 3 แถวแรก
         for r in header_rows + config["copy_rows"][:3]: 
             raw_v = ws_target.cell(row=r, column=col).value
             if is_valid_header_token(raw_v) or to_float(raw_v) is not None:
@@ -358,27 +365,43 @@ def scan_entries(ws_target, ws_cust_ref, config, check_spec=False, is_raw=False,
                     if entry_date is None:
                         entry_date = extract_date_val(raw_v)
 
-        if has_data:
-            primary_id = tokens[-1] if tokens else f"Data_Col_{get_column_letter(col)}"
-            full_sig = " | ".join(tokens) if tokens else f"Data_Col_{get_column_letter(col)}"
-
-            failures = evaluate_entry_spec(ws_target, ws_cust_ref, col, config) if check_spec else []
-            base_label = f"[Col {get_column_letter(col)}] {full_sig}"
-
-            entries.append({
-                "col": col,
-                "id": primary_id,
-                "full_sig": full_sig,
-                "label": f"⚠️ {base_label} — หลุด Spec: {', '.join(failures)}" if failures else f"✅ {base_label}",
-                "is_ng": len(failures) > 0,
-                "failures": failures,
-                "ww_num": ww_num,
-                "date_val": entry_date
-            })
-            col += step
+        # ถ้าระบุ WW หรือวันที่ได้ ให้จำเป็นค่าล่าสุดไว้
+        if ww_num is not None:
+            last_seen_ww = ww_num
         else:
-            col += 1
+            ww_num = last_seen_ww
             
+        if entry_date is not None:
+            last_seen_date = entry_date
+        else:
+            entry_date = last_seen_date
+
+        if has_data:
+            # ถ้าเป็นไฟล์ดิบ จะคืนค่าเฉพาะคอลัมน์ที่เกินกว่าไฟล์ลูกค้าแล้วเท่านั้น
+            if not (is_raw and last_cust_col_idx and col <= last_cust_col_idx):
+                primary_id = tokens[-1] if tokens else f"Data_Col_{get_column_letter(col)}"
+                full_sig = " | ".join(tokens) if tokens else f"Data_Col_{get_column_letter(col)}"
+
+                failures = evaluate_entry_spec(ws_target, ws_cust_ref, col, config) if check_spec else []
+                
+                # โชว์วันที่และ WW ที่จับได้ เพื่อให้ User มั่นใจว่าอ่านมาถูกจริงๆ
+                date_str = last_seen_date.strftime("%d-%b-%y") if last_seen_date else "No Date"
+                ww_str = f"WW{last_seen_ww} | " if last_seen_ww else ""
+                
+                base_label = f"[Col {get_column_letter(col)} | {ww_str}{date_str}] {full_sig}"
+
+                entries.append({
+                    "col": col,
+                    "id": primary_id,
+                    "full_sig": full_sig,
+                    "label": f"⚠️ {base_label} — หลุด Spec: {', '.join(failures)}" if failures else f"✅ {base_label}",
+                    "is_ng": len(failures) > 0,
+                    "failures": failures,
+                    "ww_num": ww_num,
+                    "date_val": entry_date
+                })
+        col += step
+        
     return entries
 
 def copy_cell_exact(src_cell, dst_cell, protect_formulas=True):
@@ -516,7 +539,7 @@ if cust_zip_upload and raw_zip_upload:
                         st.warning(f"⚠️ ไม่พบชีท **{sheet_key}** ในโมเดลนี้")
                         continue
 
-                    # สแกนไฟล์ลูกค้าก่อน เพื่อหาคอลัมน์สุดท้ายที่มีข้อมูล
+                    # สแกนไฟล์ลูกค้า เพื่อหาคอลัมน์สุดท้าย
                     cust_entries = scan_entries(ws_c, ws_c, config, check_spec=False, is_raw=False)
                     
                     last_cust = cust_entries[-1] if cust_entries else None
@@ -528,7 +551,7 @@ if cust_zip_upload and raw_zip_upload:
                     else:
                         st.info("📌 **ยังไม่มีข้อมูลในไฟล์ลูกค้า**")
 
-                    # สแกนไฟล์ดิบ โดยบอกให้เริ่มหาจากคอลัมน์ต่อจากไฟล์ลูกค้า (last_cust_col)
+                    # สแกนไฟล์ดิบ โดยให้แจ้งจุดที่เกินไฟล์ลูกค้าแล้ว
                     available_to_select = scan_entries(ws_r, ws_c, config, check_spec=True, is_raw=True, last_cust_col_idx=last_cust_col)
 
                     if not available_to_select:
@@ -537,6 +560,9 @@ if cust_zip_upload and raw_zip_upload:
                     else:
                         sheet_selections = []
                         for entry in available_to_select:
+                            
+                            # ลอจิกการตัดรอบ:
+                            # "อันไหนไม่มี ww ยึดวันที่" -> ถ้าเจอ WW ให้ใช้ WW, ถ้าไม่มี WW ให้ใช้วันที่แทน
                             within_cutoff = True
                             if entry["ww_num"] is not None and target_ww_num is not None:
                                 within_cutoff = (entry["ww_num"] <= target_ww_num)
