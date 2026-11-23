@@ -1,15 +1,21 @@
 import streamlit as st
 import openpyxl
-from openpyxl.utils import get_column_letter
-from copy import copy
+from openpyxl.utils import get_column_letter, column_index_from_string
+from lxml import etree
 import io
 import datetime
 import re
 import zipfile
 import os
+import posixpath
 
 st.set_page_config(page_title="Customer Data Batch Auto-Filler", layout="wide")
-st.title("📦 ระบบเติมข้อมูลส่งลูกค้าอัตโนมัติ (แยกตามโมเดล + กรอง WW และวันที่)")
+st.title("📦 ระบบเติมข้อมูลส่งลูกค้าอัตโนมัติ (รักษา Shape/กราฟ 100% ผ่านเว็บ)")
+
+MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+PKG_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+XML_NS = "http://www.w3.org/XML/1998/namespace"
 
 # ==========================================
 # ฟังก์ชันแปลงช่วงแถว และสกัด WW / วันที่ / Lab ID
@@ -53,7 +59,6 @@ def extract_date_val(val):
     if not s or len(s) < 4:
         return None
 
-    # รองรับรูปแบบ 9/15/2026 หรือ 03-Aug-26 หรือ washing date 15 Oct'26
     m1 = re.search(r'(\d{1,2})[\-\/\s]+([A-Za-z]{3})[\-\/\s\']*(\d{2,4})', s)
     if m1:
         day, mon, yr = m1.group(1), m1.group(2), m1.group(3)
@@ -285,17 +290,15 @@ def normalize_filename(name):
     return re.sub(r'[\s_\-]+', '', s)
 
 # ==========================================
-# Helper Functions สำหรับจัดการ Merge, อ่านค่า และตรวจสอบข้อมูลจริง
+# Helper Functions สำหรับอ่านและสแกนข้อมูล (ใช้ openpyxl อ่านอย่างเดียว)
 # ==========================================
 def get_merge_bounds(ws, row, col):
-    """คืนค่า (min_col, max_col) ของเซลล์ที่ถูก Merge ในแถวและคอลัมน์นั้น"""
     for m in ws.merged_cells.ranges:
         if m.min_row <= row <= m.max_row and m.min_col <= col <= m.max_col:
             return m.min_col, m.max_col
     return col, col
 
 def get_cell_effective_val(ws, row, col):
-    """ดึงค่าของเซลล์ หากเป็นเซลล์ที่ถูก Merge จะดึงค่าจากคอลัมน์ซ้ายสุดของกลุ่ม Merge เสมอ"""
     min_c, _ = get_merge_bounds(ws, row, col)
     return ws.cell(row=row, column=min_c).value
 
@@ -371,7 +374,6 @@ def get_data_rows(config):
     return d_rows if d_rows else config["copy_rows"]
 
 def single_col_has_measurement(ws, col, config):
-    """เช็คว่าคอลัมน์เดี่ยวนั้นมีค่าตัวเลขผลเทสจริงหรือไม่"""
     for r in get_data_rows(config):
         val = ws.cell(row=r, column=col).value
         if val is None:
@@ -386,29 +388,19 @@ def single_col_has_measurement(ws, col, config):
     return False
 
 def determine_entry_span(ws, col, config):
-    """
-    คำนวณความกว้างคอลัมน์จริงของชุดข้อมูลที่ตำแหน่ง col:
-    แก้ปัญหาในชีทที่มีทั้งข้อมูลเก่า 1 คอลัมน์ (เช่น คอลัมน์ L ใน FTIR) ปนกับข้อมูล 2 คอลัมน์คู่กัน (M-N, O-P, Q-R)
-    """
     default_step = config["step"]
     if default_step == 1:
         return 1
-
-    # เช็คว่าหัวตารางในคอลัมน์นี้ถูก Merge ไว้กี่ช่อง
     for r in config["header_rows"]:
         min_c, max_c = get_merge_bounds(ws, r, col)
         if min_c == col and max_c > col:
             return min(max_c - min_c + 1, default_step)
         elif min_c < col <= max_c:
-            # กรณี col ไปตกอยู่คอลัมน์ขวาของคู่ที่ Merge อยู่แล้ว ให้ใช้ 1 เพื่อไม่ให้กินพื้นที่คอลัมน์ถัดไป
             return 1
-
-    # ถ้าไม่ได้ Merge ให้ดูว่าคอลัมน์ถัดไป (col+1) เริ่มต้น Merge ชุดใหม่หรือไม่
     for r in config["header_rows"]:
         min_c_next, max_c_next = get_merge_bounds(ws, r, col + 1)
         if min_c_next == col + 1 and max_c_next > col + 1:
-            return 1 # แปลว่า col ปัจจุบันเป็นคอลัมน์เดี่ยว (เช่น คอลัมน์ L)
-
+            return 1
     return default_step
 
 def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
@@ -422,13 +414,11 @@ def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
     last_seen_date = None
 
     while col <= max_col:
-        # ถ้าคอลัมน์ปัจจุบันไม่มีผลเทสเลย ให้ขยับไปทีละ 1 คอลัมน์ (จะไม่กระโดดข้ามทีละ 2 จนเกิดการเหลื่อมคอลัมน์)
         if not single_col_has_measurement(ws_target, col, config):
             col += 1
             continue
 
         span = determine_entry_span(ws_target, col, config)
-        # ตรวจสอบว่าถ้า span=2 แล้วคอลัมน์ที่ 2 มีข้อมูลหรือไม่ (ถ้าคอลัมน์ที่ 2 มีข้อมูลรวมอยู่ด้วยจะได้จับคู่ถูกต้อง)
         if span > 1 and not single_col_has_measurement(ws_target, col + 1, config):
             span = 1
 
@@ -452,10 +442,8 @@ def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
                         col_date = d_extracted
                     if unique_id is None:
                         unique_id = extract_unique_lot_or_lab_id(s_raw)
-
                     if r in header_rows and is_valid_header_token(raw_v):
                         s_val = format_val(raw_v)
-                        # กรองคำซ้ำที่เป็นชื่อวัสดุ/โมเดลท้ายตารางออกถ้ามีคำอื่นแล้ว เพื่อให้อ่านง่าย
                         if s_val and s_val not in tokens:
                             tokens.append(s_val)
 
@@ -469,7 +457,6 @@ def scan_all_valid_entries(ws_target, ws_cust_ref, config, check_spec=False):
         else:
             col_date = last_seen_date
 
-        # สร้างลายเซ็นจากตัวเลขผลเทสทั้งหมดในชุดข้อมูลนั้น
         data_vals = []
         for r in data_rows:
             for offset in range(span):
@@ -514,7 +501,6 @@ def filter_new_raw_entries(cust_entries, raw_entries):
         return []
 
     last_c = cust_entries[-1]
-
     match_indices = []
     for i, r_ent in enumerate(raw_entries):
         if last_c["unique_id"] and r_ent["unique_id"] and last_c["unique_id"] == r_ent["unique_id"]:
@@ -523,8 +509,7 @@ def filter_new_raw_entries(cust_entries, raw_entries):
             match_indices.append(i)
 
     if match_indices:
-        cutoff_idx = match_indices[-1]
-        return raw_entries[cutoff_idx + 1:]
+        return raw_entries[match_indices[-1] + 1:]
 
     if last_c["date_val"] is not None:
         newer_by_date = [r for r in raw_entries if r["date_val"] is not None and r["date_val"] > last_c["date_val"]]
@@ -536,50 +521,307 @@ def filter_new_raw_entries(cust_entries, raw_entries):
 
     return []
 
-def copy_cell_exact(src_cell, dst_cell, protect_formulas=True, override_val=None):
-    if protect_formulas and isinstance(dst_cell.value, str) and dst_cell.value.startswith("="):
-        return
-    dst_cell.value = override_val if override_val is not None else src_cell.value
-    if src_cell.has_style:
-        dst_cell.font, dst_cell.fill = copy(src_cell.font), copy(src_cell.fill)
-        dst_cell.border, dst_cell.alignment = copy(src_cell.border), copy(src_cell.alignment)
-        dst_cell.number_format = src_cell.number_format
-    dst_cell.comment = copy(src_cell.comment) if src_cell.comment else None
-    if src_cell.hyperlink:
-        dst_cell.hyperlink = copy(src_cell.hyperlink)
+# ==========================================
+# ระบบ XML Patching (เขียนลงไฟล์ลูกค้าโดยตรง ไม่แตะ Shape/Chart/Drawing)
+# ==========================================
+def clean_xml_str(s):
+    """ลบอักขระควบคุมที่ผิดกฎ XML ออก"""
+    return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(s))
 
-def append_entry_to_customer(ws_raw, ws_cust, src_col, dst_col, span, config, protect_formulas=True):
-    """
-    คัดลอกชุดข้อมูลตามความกว้างจริง (span) และดึงหัวตารางที่ Merge ไว้มาวางให้ครบ 100%
-    """
+def parse_cell_ref(ref):
+    m = re.match(r'^([A-Z]+)(\d+)$', ref)
+    if not m:
+        return 0, 0
+    return int(m.group(2)), column_index_from_string(m.group(1))
+
+def parse_range_ref(ref):
+    parts = ref.split(":")
+    if len(parts) == 1:
+        r1, c1 = parse_cell_ref(parts[0])
+        return r1, c1, r1, c1
+    r1, c1 = parse_cell_ref(parts[0])
+    r2, c2 = parse_cell_ref(parts[1])
+    return r1, c1, r2, c2
+
+def get_sheet_zip_paths(z):
+    """จับคู่ชื่อชีท (ตัวพิมพ์เล็ก) -> path ของไฟล์ XML ภายใน ZIP"""
+    wb_xml = etree.fromstring(z.read("xl/workbook.xml"))
+    rels_xml = etree.fromstring(z.read("xl/_rels/workbook.xml.rels"))
+
+    rid_to_target = {}
+    for rel in rels_xml.findall(f"{{{PKG_REL_NS}}}Relationship"):
+        rid_to_target[rel.get("Id")] = rel.get("Target")
+
+    sheet_map = {}
+    sheets_el = wb_xml.find(f"{{{MAIN_NS}}}sheets")
+    if sheets_el is not None:
+        for sh in sheets_el.findall(f"{{{MAIN_NS}}}sheet"):
+            name = sh.get("name")
+            rid = sh.get(f"{{{REL_NS}}}id")
+            target = rid_to_target.get(rid, "")
+            if target:
+                if target.startswith("/"):
+                    full_path = target.lstrip("/")
+                else:
+                    full_path = posixpath.normpath(posixpath.join("xl", target))
+                sheet_map[name.strip().lower()] = full_path
+    return sheet_map
+
+def get_or_create_row(sheet_data, row_num):
+    """หาหรือสร้าง <row r="row_num"> โดยเรียงลำดับแถวจากน้อยไปมากเป๊ะๆ"""
+    for idx, row_el in enumerate(sheet_data):
+        r_attr = row_el.get("r")
+        if r_attr:
+            r_int = int(r_attr)
+            if r_int == row_num:
+                return row_el
+            elif r_int > row_num:
+                new_row = etree.Element(f"{{{MAIN_NS}}}row", r=str(row_num))
+                sheet_data.insert(idx, new_row)
+                return new_row
+    new_row = etree.SubElement(sheet_data, f"{{{MAIN_NS}}}row", r=str(row_num))
+    return new_row
+
+def get_or_create_cell(row_el, row_num, col_num):
+    """หาหรือสร้าง <c r="COLROW"> โดยเรียงลำดับคอลัมน์จากซ้ายไปขวาเป๊ะๆ"""
+    ref = f"{get_column_letter(col_num)}{row_num}"
+    for idx, c_el in enumerate(row_el):
+        c_ref = c_el.get("r")
+        if c_ref:
+            _, c_int = parse_cell_ref(c_ref)
+            if c_int == col_num:
+                return c_el
+            elif c_int > col_num:
+                new_c = etree.Element(f"{{{MAIN_NS}}}c", r=ref)
+                row_el.insert(idx, new_c)
+                return new_c
+    new_c = etree.SubElement(row_el, f"{{{MAIN_NS}}}c", r=ref)
+    return new_c
+
+def find_inherited_style(row_el, target_col):
+    """ดึง Style (s) จากคอลัมน์ก่อนหน้าในแถวเดียวกัน เพื่อให้สี/ขอบ/วันที่เหมือนต้นฉบับเป๊ะ"""
+    best_style = None
+    best_col = -1
+    for c_el in row_el:
+        c_ref = c_el.get("r")
+        s_attr = c_el.get("s")
+        if c_ref and s_attr is not None:
+            _, c_int = parse_cell_ref(c_ref)
+            if c_int < target_col and c_int > best_col:
+                best_col = c_int
+                best_style = s_attr
+    return best_style
+
+def write_value_to_cell_xml(c_el, val, row_el, col_num, protect_formulas=True):
+    """เขียนค่าลงใน XML ของเซลล์โดยรักษา Style เดิมและไม่ทับสูตร"""
+    has_formula = c_el.find(f"{{{MAIN_NS}}}f") is not None
+    if protect_formulas and has_formula:
+        return
+
+    # ถ้ายังไม่มี Style (s) ให้ดึงจากคอลัมน์ซ้ายที่ใกล้ที่สุดในแถวเดียวกัน
+    if c_el.get("s") is None:
+        inh_s = find_inherited_style(row_el, col_num)
+        if inh_s is not None:
+            c_el.set("s", inh_s)
+
+    # ลบค่าเก่า (<v>, <is>, <f>) ออกก่อนเขียนใหม่
+    for child in list(c_el):
+        c_el.remove(child)
+
+    if val is None or (isinstance(val, str) and val == ""):
+        c_el.attrib.pop("t", None)
+        return
+
+    if isinstance(val, bool):
+        c_el.set("t", "b")
+        v_el = etree.SubElement(c_el, f"{{{MAIN_NS}}}v")
+        v_el.text = "1" if val else "0"
+    elif isinstance(val, (datetime.datetime, datetime.date)):
+        c_el.attrib.pop("t", None)
+        if isinstance(val, datetime.datetime):
+            serial = (val - datetime.datetime(1899, 12, 30)).total_seconds() / 86400.0
+        else:
+            serial = (val - datetime.date(1899, 12, 30)).days
+        v_el = etree.SubElement(c_el, f"{{{MAIN_NS}}}v")
+        v_el.text = str(serial)
+    elif isinstance(val, (int, float)):
+        c_el.attrib.pop("t", None)
+        v_el = etree.SubElement(c_el, f"{{{MAIN_NS}}}v")
+        v_el.text = str(val)
+    else:
+        # เขียนข้อความเป็น inlineStr เพื่อไม่ต้องไปยุ่งกับ sharedStrings.xml
+        c_el.set("t", "inlineStr")
+        is_el = etree.SubElement(c_el, f"{{{MAIN_NS}}}is")
+        t_el = etree.SubElement(is_el, f"{{{MAIN_NS}}}t")
+        t_el.set(f"{{{XML_NS}}}space", "preserve")
+        t_el.text = clean_xml_str(val)
+
+def get_or_create_merge_cells(root):
+    """หาหรือสร้าง <mergeCells> ในตำแหน่งที่ถูกต้องตามมาตรฐาน OOXML Schema"""
+    mc = root.find(f"{{{MAIN_NS}}}mergeCells")
+    if mc is not None:
+        return mc
+
+    after_tags = {
+        f"{{{MAIN_NS}}}{tag}" for tag in [
+            "phoneticPr", "conditionalFormatting", "dataValidations", "hyperlinks",
+            "printOptions", "pageMargins", "pageSetup", "headerFooter", "rowBreaks",
+            "colBreaks", "customProperties", "cellWatches", "ignoredErrors",
+            "smartTags", "drawing", "legacyDrawing", "legacyDrawingHF", "picture", "extLst"
+        ]
+    }
+    mc = etree.Element(f"{{{MAIN_NS}}}mergeCells", count="0")
+    for idx, child in enumerate(root):
+        if child.tag in after_tags:
+            root.insert(idx, mc)
+            return mc
+    root.append(mc)
+    return mc
+
+def patch_sheet_xml(sheet_xml_bytes, ws_raw, entries, start_dst_col, config, protect_formulas=True):
+    """เจาะแก้ข้อมูลลงใน XML ของชีทลูกค้าโดยตรง"""
+    parser = etree.XMLParser(remove_blank_text=False)
+    root = etree.fromstring(sheet_xml_bytes, parser=parser)
+    sheet_data = root.find(f"{{{MAIN_NS}}}sheetData")
+    if sheet_data is None:
+        return sheet_xml_bytes
+
     copy_rows = config["copy_rows"]
     header_rows_set = set(config["header_rows"])
+    curr_dst_col = start_dst_col
+    modified_cols = set()
+    merges_to_add = []
+    merges_to_clear = [] # (row, col_start, col_end)
 
-    for r in copy_rows:
-        # 1. ยกเลิก Merge เดิมในพื้นที่ปลายทางที่จะวาง (dst_col ถึง dst_col + span - 1)
-        for m_range in list(ws_cust.merged_cells.ranges):
-            if m_range.min_row <= r <= m_range.max_row and not (m_range.max_col < dst_col or m_range.min_col >= dst_col + span):
-                ws_cust.unmerge_cells(str(m_range))
+    for entry in entries:
+        src_col = entry["col"]
+        span = entry.get("span", config["step"])
 
-        # 2. เช็คว่าต้นทางมีการ Merge ในแถวนี้หรือไม่
-        min_c_src, max_c_src = get_merge_bounds(ws_raw, r, src_col)
-        src_merge_width = max_c_src - min_c_src + 1
-
-        # 3. คัดลอกเซลล์ทีละคอลัมน์ย่อย
         for offset in range(span):
-            s_cell = ws_raw.cell(row=r, column=src_col + offset)
-            d_cell = ws_cust.cell(row=r, column=dst_col + offset)
+            modified_cols.add(curr_dst_col + offset)
 
-            # ถ้าเป็นแถวหัวตารางที่ถูก Merge มาจากคอลัมน์ซ้าย ให้ดึงค่าและสไตล์จากตัวต้นทางของ Merge มาใส่ในช่องแรก
-            if offset == 0 and s_cell.value is None and min_c_src < src_col:
-                master_cell = ws_raw.cell(row=r, column=min_c_src)
-                copy_cell_exact(master_cell, d_cell, protect_formulas, override_val=master_cell.value)
+        for r in copy_rows:
+            row_el = get_or_create_row(sheet_data, r)
+            min_c_src, max_c_src = get_merge_bounds(ws_raw, r, src_col)
+            src_merge_width = max_c_src - min_c_src + 1
+
+            merges_to_clear.append((r, curr_dst_col, curr_dst_col + span - 1))
+
+            for offset in range(span):
+                s_val = ws_raw.cell(row=r, column=src_col + offset).value
+                if offset == 0 and s_val is None and min_c_src < src_col:
+                    s_val = ws_raw.cell(row=r, column=min_c_src).value
+
+                c_el = get_or_create_cell(row_el, r, curr_dst_col + offset)
+                write_value_to_cell_xml(c_el, s_val, row_el, curr_dst_col + offset, protect_formulas)
+
+            # ถ้าต้นทาง Merge ไว้ หรือเป็นแถวหัวตารางแบบ 2 คอลัมน์คู่ ให้สร้าง Merge ที่ปลายทางด้วย
+            if span > 1 and (src_merge_width >= span or (r in header_rows_set and ws_raw.cell(row=r, column=src_col + 1).value is None)):
+                m_ref = f"{get_column_letter(curr_dst_col)}{r}:{get_column_letter(curr_dst_col + span - 1)}{r}"
+                merges_to_add.append(m_ref)
+
+        curr_dst_col += span
+
+    # เคลียร์ค่าแคชเก่า (เช่น #DIV/0!) ในช่องที่มีสูตรของคอลัมน์ที่เพิ่งเติมข้อมูล เพื่อให้ Excel คำนวณใหม่ทันทีตอนเปิด
+    for row_el in sheet_data:
+        for c_el in row_el:
+            c_ref = c_el.get("r")
+            if not c_ref:
+                continue
+            _, c_int = parse_cell_ref(c_ref)
+            if c_int in modified_cols and c_el.find(f"{{{MAIN_NS}}}f") is not None:
+                v_el = c_el.find(f"{{{MAIN_NS}}}v")
+                if v_el is not None:
+                    c_el.remove(v_el)
+                if c_el.get("t") == "e":
+                    c_el.attrib.pop("t", None)
+
+    # จัดการ Merge Cells
+    if merges_to_clear or merges_to_add:
+        mc = root.find(f"{{{MAIN_NS}}}mergeCells")
+        if mc is not None:
+            for m_el in list(mc):
+                ref = m_el.get("ref")
+                if not ref:
+                    continue
+                r1, c1, r2, c2 = parse_range_ref(ref)
+                should_remove = False
+                for cr, cc1, cc2 in merges_to_clear:
+                    if r1 <= cr <= r2 and not (c2 < cc1 or c1 > cc2):
+                        should_remove = True
+                        break
+                if should_remove:
+                    mc.remove(m_el)
+
+        if merges_to_add:
+            mc = get_or_create_merge_cells(root)
+            existing_refs = {m.get("ref") for m in mc}
+            for new_ref in merges_to_add:
+                if new_ref not in existing_refs:
+                    etree.SubElement(mc, f"{{{MAIN_NS}}}mergeCell", ref=new_ref)
+                    existing_refs.add(new_ref)
+
+        if mc is not None:
+            if len(mc) == 0:
+                root.remove(mc)
             else:
-                copy_cell_exact(s_cell, d_cell, protect_formulas)
+                mc.set("count", str(len(mc)))
 
-        # 4. ถ้าเป็นแถวหัวตารางในชีทที่ใช้ 2 คอลัมน์คู่กัน และต้นทาง Merge ไว้ (หรือช่องที่ 2 ว่าง) ให้ Merge ปลายทางเข้าด้วยกัน
-        if span > 1 and (src_merge_width >= span or (r in header_rows_set and ws_raw.cell(row=r, column=src_col + 1).value is None)):
-            ws_cust.merge_cells(start_row=r, start_column=dst_col, end_row=r, end_column=dst_col + span - 1)
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+def patch_workbook_for_recalc(wb_xml_bytes):
+    """ตั้งค่า fullCalcOnLoad="1" ใน workbook.xml ให้ Excel อัปเดตสูตรและกราฟอัตโนมัติตอนเปิดไฟล์"""
+    parser = etree.XMLParser(remove_blank_text=False)
+    root = etree.fromstring(wb_xml_bytes, parser=parser)
+    calc_pr = root.find(f"{{{MAIN_NS}}}calcPr")
+    if calc_pr is None:
+        calc_pr = etree.SubElement(root, f"{{{MAIN_NS}}}calcPr")
+    calc_pr.set("fullCalcOnLoad", "1")
+    return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
+
+def process_single_model_xml_safe(cust_bytes, raw_bytes, selections, protect_formulas=True):
+    """แก้ไขไฟล์ลูกค้าด้วย XML Patching เพื่อรักษา Shape, กราฟ, Macro และ Format เดิม 100%"""
+    wb_raw_src = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True)
+    added_count = 0
+
+    with zipfile.ZipFile(io.BytesIO(cust_bytes), "r") as zin:
+        sheet_zip_map = get_sheet_zip_paths(zin)
+        modified_parts = {}
+
+        for sheet_key, sheet_data in selections.items():
+            if not sheet_data or not sheet_data["entries"]:
+                continue
+
+            ws_r_src = find_sheet_in_wb(wb_raw_src, sheet_key)
+            target_xml_path = sheet_zip_map.get(sheet_key.strip().lower())
+            if ws_r_src is None or not target_xml_path or target_xml_path not in zin.namelist():
+                continue
+
+            orig_sheet_xml = zin.read(target_xml_path)
+            patched_xml = patch_sheet_xml(
+                orig_sheet_xml,
+                ws_r_src,
+                sheet_data["entries"],
+                sheet_data["next_col"],
+                sheet_data["config"],
+                protect_formulas=protect_formulas
+            )
+            modified_parts[target_xml_path] = patched_xml
+            added_count += len(sheet_data["entries"])
+
+        if added_count > 0 and "xl/workbook.xml" in zin.namelist():
+            modified_parts["xl/workbook.xml"] = patch_workbook_for_recalc(zin.read("xl/workbook.xml"))
+
+        # แพ็กไฟล์กลับเป็น Excel เดิม โดยคงไฟล์อื่นๆ (drawing, chart, vba, media, style) ไว้ 100% เหมือนเดิมทุกไบต์
+        out_buf = io.BytesIO()
+        with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
+            for item in zin.infolist():
+                if item.filename in modified_parts:
+                    zout.writestr(item, modified_parts[item.filename])
+                else:
+                    zout.writestr(item, zin.read(item.filename))
+
+        return out_buf.getvalue(), added_count
 
 def load_uploaded_files(upload_input):
     files_dict = {}
@@ -692,7 +934,6 @@ if cust_zip_upload and raw_zip_upload:
                     raw_entries = scan_all_valid_entries(ws_r, ws_c, config, check_spec=True)
 
                     last_cust = cust_entries[-1] if cust_entries else None
-                    # วางต่อท้ายคอลัมน์สุดท้ายที่มีผลเทสจริงทันที (end_col + 1) ไม่เกิดช่องว่างแหว่งเหมือนคอลัมน์ S อีกต่อไป
                     next_dest_col = last_cust["end_col"] + 1 if last_cust else config["start_col"]
 
                     if last_cust:
@@ -736,40 +977,23 @@ if cust_zip_upload and raw_zip_upload:
             }
 
     st.markdown("---")
-    if st.button("🚀 ประมวลผลและดาวน์โหลดไฟล์", type="primary", use_container_width=True):
-        with st.spinner("กำลังคัดลอกข้อมูลและบันทึกไฟล์..."):
+    if st.button("🚀 ประมวลผลและดาวน์โหลดไฟล์ (รักษา Shape/กราฟ 100%)", type="primary", use_container_width=True):
+        with st.spinner("กำลังเติมข้อมูลลงไฟล์ต้นฉบับโดยตรง (XML Patching)..."):
             total_added_all = 0
             processed_files = {}
 
             for c_name, data in all_models_data.items():
                 r_name = data["raw_name"]
-                is_xlsm = c_name.lower().endswith(".xlsm")
-                wb_cust_out = openpyxl.load_workbook(io.BytesIO(cust_files_map[c_name]), keep_vba=is_xlsm)
-                wb_raw_src = openpyxl.load_workbook(io.BytesIO(raw_files_map[r_name]), data_only=True)
+                patched_bytes, added_cnt = process_single_model_xml_safe(
+                    cust_files_map[c_name],
+                    raw_files_map[r_name],
+                    data["selections"],
+                    protect_formulas=protect_formulas
+                )
+                processed_files[c_name] = patched_bytes
+                total_added_all += added_cnt
 
-                for sheet_key, sheet_data in data["selections"].items():
-                    if not sheet_data or not sheet_data["entries"]:
-                        continue
-
-                    ws_c_out = find_sheet_in_wb(wb_cust_out, sheet_key)
-                    ws_r_src = find_sheet_in_wb(wb_raw_src, sheet_key)
-                    if ws_c_out is None or ws_r_src is None:
-                        continue
-
-                    cfg = sheet_data["config"]
-                    curr_dst_col = sheet_data["next_col"]
-
-                    for entry in sheet_data["entries"]:
-                        span = entry.get("span", cfg["step"])
-                        append_entry_to_customer(ws_r_src, ws_c_out, entry["col"], curr_dst_col, span, cfg, protect_formulas)
-                        curr_dst_col += span
-                        total_added_all += 1
-
-                file_out_buffer = io.BytesIO()
-                wb_cust_out.save(file_out_buffer)
-                processed_files[c_name] = file_out_buffer.getvalue()
-
-            st.success(f"🎉 เติมข้อมูลสำเร็จทั้งหมด **{total_added_all}** ชุดข้อมูล จาก {len(processed_files)} โมเดล!")
+            st.success(f"🎉 เติมข้อมูลสำเร็จทั้งหมด **{total_added_all}** ชุดข้อมูล จาก {len(processed_files)} โมเดล (กราฟ Shape สูตร และรูปแบบต้นฉบับอยู่ครบ 100%)!")
 
             if len(processed_files) == 1:
                 single_name = list(processed_files.keys())[0]
