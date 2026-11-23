@@ -525,7 +525,6 @@ def filter_new_raw_entries(cust_entries, raw_entries):
 # ระบบ XML Patching (เขียนลงไฟล์ลูกค้าโดยตรง ไม่แตะ Shape/Chart/Drawing)
 # ==========================================
 def clean_xml_str(s):
-    """ลบอักขระควบคุมที่ผิดกฎ XML ออก"""
     return re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', str(s))
 
 def parse_cell_ref(ref):
@@ -544,7 +543,6 @@ def parse_range_ref(ref):
     return r1, c1, r2, c2
 
 def get_sheet_zip_paths(z):
-    """จับคู่ชื่อชีท (ตัวพิมพ์เล็ก) -> path ของไฟล์ XML ภายใน ZIP"""
     wb_xml = etree.fromstring(z.read("xl/workbook.xml"))
     rels_xml = etree.fromstring(z.read("xl/_rels/workbook.xml.rels"))
 
@@ -568,7 +566,6 @@ def get_sheet_zip_paths(z):
     return sheet_map
 
 def get_or_create_row(sheet_data, row_num):
-    """หาหรือสร้าง <row r="row_num"> โดยเรียงลำดับแถวจากน้อยไปมากเป๊ะๆ"""
     for idx, row_el in enumerate(sheet_data):
         r_attr = row_el.get("r")
         if r_attr:
@@ -583,7 +580,6 @@ def get_or_create_row(sheet_data, row_num):
     return new_row
 
 def get_or_create_cell(row_el, row_num, col_num):
-    """หาหรือสร้าง <c r="COLROW"> โดยเรียงลำดับคอลัมน์จากซ้ายไปขวาเป๊ะๆ"""
     ref = f"{get_column_letter(col_num)}{row_num}"
     for idx, c_el in enumerate(row_el):
         c_ref = c_el.get("r")
@@ -599,7 +595,6 @@ def get_or_create_cell(row_el, row_num, col_num):
     return new_c
 
 def find_inherited_style(row_el, target_col):
-    """ดึง Style (s) จากคอลัมน์ก่อนหน้าในแถวเดียวกัน เพื่อให้สี/ขอบ/วันที่เหมือนต้นฉบับเป๊ะ"""
     best_style = None
     best_col = -1
     for c_el in row_el:
@@ -612,19 +607,16 @@ def find_inherited_style(row_el, target_col):
                 best_style = s_attr
     return best_style
 
-def write_value_to_cell_xml(c_el, val, row_el, col_num, protect_formulas=True):
-    """เขียนค่าลงใน XML ของเซลล์โดยรักษา Style เดิมและไม่ทับสูตร"""
+def write_value_to_cell_xml(c_el, val, row_el, col_num, protect_formulas=True, force_style=False):
     has_formula = c_el.find(f"{{{MAIN_NS}}}f") is not None
     if protect_formulas and has_formula:
         return
 
-    # ถ้ายังไม่มี Style (s) ให้ดึงจากคอลัมน์ซ้ายที่ใกล้ที่สุดในแถวเดียวกัน
-    if c_el.get("s") is None:
+    if force_style or c_el.get("s") is None:
         inh_s = find_inherited_style(row_el, col_num)
         if inh_s is not None:
             c_el.set("s", inh_s)
 
-    # ลบค่าเก่า (<v>, <is>, <f>) ออกก่อนเขียนใหม่
     for child in list(c_el):
         c_el.remove(child)
 
@@ -649,7 +641,6 @@ def write_value_to_cell_xml(c_el, val, row_el, col_num, protect_formulas=True):
         v_el = etree.SubElement(c_el, f"{{{MAIN_NS}}}v")
         v_el.text = str(val)
     else:
-        # เขียนข้อความเป็น inlineStr เพื่อไม่ต้องไปยุ่งกับ sharedStrings.xml
         c_el.set("t", "inlineStr")
         is_el = etree.SubElement(c_el, f"{{{MAIN_NS}}}is")
         t_el = etree.SubElement(is_el, f"{{{MAIN_NS}}}t")
@@ -657,7 +648,6 @@ def write_value_to_cell_xml(c_el, val, row_el, col_num, protect_formulas=True):
         t_el.text = clean_xml_str(val)
 
 def get_or_create_merge_cells(root):
-    """หาหรือสร้าง <mergeCells> ในตำแหน่งที่ถูกต้องตามมาตรฐาน OOXML Schema"""
     mc = root.find(f"{{{MAIN_NS}}}mergeCells")
     if mc is not None:
         return mc
@@ -678,8 +668,7 @@ def get_or_create_merge_cells(root):
     root.append(mc)
     return mc
 
-def patch_sheet_xml(sheet_xml_bytes, ws_raw, entries, start_dst_col, config, protect_formulas=True):
-    """เจาะแก้ข้อมูลลงใน XML ของชีทลูกค้าโดยตรง"""
+def patch_sheet_xml(sheet_xml_bytes, sheet_key, ws_raw, entries, start_dst_col, config, protect_formulas=True):
     parser = etree.XMLParser(remove_blank_text=False)
     root = etree.fromstring(sheet_xml_bytes, parser=parser)
     sheet_data = root.find(f"{{{MAIN_NS}}}sheetData")
@@ -688,10 +677,13 @@ def patch_sheet_xml(sheet_xml_bytes, ws_raw, entries, start_dst_col, config, pro
 
     copy_rows = config["copy_rows"]
     header_rows_set = set(config["header_rows"])
+    is_lpc_sheet = (sheet_key.strip().lower() == "lpc")
+    mold_row = max(copy_rows) if is_lpc_sheet else -1
+
     curr_dst_col = start_dst_col
     modified_cols = set()
     merges_to_add = []
-    merges_to_clear = [] # (row, col_start, col_end)
+    merges_to_clear = []
 
     for entry in entries:
         src_col = entry["col"]
@@ -713,16 +705,23 @@ def patch_sheet_xml(sheet_xml_bytes, ws_raw, entries, start_dst_col, config, pro
                     s_val = ws_raw.cell(row=r, column=min_c_src).value
 
                 c_el = get_or_create_cell(row_el, r, curr_dst_col + offset)
-                write_value_to_cell_xml(c_el, s_val, row_el, curr_dst_col + offset, protect_formulas)
+                is_header_or_mold = (r in header_rows_set) or (r == mold_row)
+                write_value_to_cell_xml(
+                    c_el,
+                    s_val,
+                    row_el,
+                    curr_dst_col + offset,
+                    protect_formulas=(False if is_header_or_mold else protect_formulas),
+                    force_style=is_header_or_mold
+                )
 
-            # ถ้าต้นทาง Merge ไว้ หรือเป็นแถวหัวตารางแบบ 2 คอลัมน์คู่ ให้สร้าง Merge ที่ปลายทางด้วย
             if span > 1 and (src_merge_width >= span or (r in header_rows_set and ws_raw.cell(row=r, column=src_col + 1).value is None)):
                 m_ref = f"{get_column_letter(curr_dst_col)}{r}:{get_column_letter(curr_dst_col + span - 1)}{r}"
                 merges_to_add.append(m_ref)
 
         curr_dst_col += span
 
-    # เคลียร์ค่าแคชเก่า (เช่น #DIV/0!) ในช่องที่มีสูตรของคอลัมน์ที่เพิ่งเติมข้อมูล เพื่อให้ Excel คำนวณใหม่ทันทีตอนเปิด
+    # เคลียร์ค่าแคชเก่าในช่องที่มีสูตรของคอลัมน์ที่เพิ่งเติมข้อมูล เพื่อให้ Excel คำนวณใหม่ทันทีตอนเปิด
     for row_el in sheet_data:
         for c_el in row_el:
             c_ref = c_el.get("r")
@@ -736,7 +735,6 @@ def patch_sheet_xml(sheet_xml_bytes, ws_raw, entries, start_dst_col, config, pro
                 if c_el.get("t") == "e":
                     c_el.attrib.pop("t", None)
 
-    # จัดการ Merge Cells
     if merges_to_clear or merges_to_add:
         mc = root.find(f"{{{MAIN_NS}}}mergeCells")
         if mc is not None:
@@ -770,7 +768,6 @@ def patch_sheet_xml(sheet_xml_bytes, ws_raw, entries, start_dst_col, config, pro
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 def patch_workbook_for_recalc(wb_xml_bytes):
-    """ตั้งค่า fullCalcOnLoad="1" ใน workbook.xml ให้ Excel อัปเดตสูตรและกราฟอัตโนมัติตอนเปิดไฟล์"""
     parser = etree.XMLParser(remove_blank_text=False)
     root = etree.fromstring(wb_xml_bytes, parser=parser)
     calc_pr = root.find(f"{{{MAIN_NS}}}calcPr")
@@ -780,7 +777,6 @@ def patch_workbook_for_recalc(wb_xml_bytes):
     return etree.tostring(root, xml_declaration=True, encoding="UTF-8", standalone=True)
 
 def process_single_model_xml_safe(cust_bytes, raw_bytes, selections, protect_formulas=True):
-    """แก้ไขไฟล์ลูกค้าด้วย XML Patching เพื่อรักษา Shape, กราฟ, Macro และ Format เดิม 100%"""
     wb_raw_src = openpyxl.load_workbook(io.BytesIO(raw_bytes), data_only=True)
     added_count = 0
 
@@ -800,6 +796,7 @@ def process_single_model_xml_safe(cust_bytes, raw_bytes, selections, protect_for
             orig_sheet_xml = zin.read(target_xml_path)
             patched_xml = patch_sheet_xml(
                 orig_sheet_xml,
+                sheet_key,
                 ws_r_src,
                 sheet_data["entries"],
                 sheet_data["next_col"],
@@ -812,7 +809,6 @@ def process_single_model_xml_safe(cust_bytes, raw_bytes, selections, protect_for
         if added_count > 0 and "xl/workbook.xml" in zin.namelist():
             modified_parts["xl/workbook.xml"] = patch_workbook_for_recalc(zin.read("xl/workbook.xml"))
 
-        # แพ็กไฟล์กลับเป็น Excel เดิม โดยคงไฟล์อื่นๆ (drawing, chart, vba, media, style) ไว้ 100% เหมือนเดิมทุกไบต์
         out_buf = io.BytesIO()
         with zipfile.ZipFile(out_buf, "w", zipfile.ZIP_DEFLATED) as zout:
             for item in zin.infolist():
