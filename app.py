@@ -11,7 +11,7 @@ import os
 import posixpath
 
 st.set_page_config(page_title="Customer Data Batch Auto-Filler", layout="wide")
-st.title("📦 ระบบเติมข้อมูลส่งลูกค้าอัตโนมัติ (5 โปรไฟล์โมเดล + ลบ NG เก่า + กรอง WW/วันที่)")
+st.title("📦 ระบบเติมข้อมูลส่งลูกค้าอัตโนมัติ (6 โปรไฟล์โมเดล + ลบ NG เก่า + กรอง WW/วันที่)")
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -91,10 +91,10 @@ def extract_date_val(val):
     return None
 
 # ==========================================
-# ตั้งค่าพิกัดแถวและ Spec แยกตาม 5 โปรไฟล์โมเดล
+# ตั้งค่าพิกัดแถวและ Spec แยกตาม 6 โปรไฟล์โมเดล
 # ==========================================
 MODEL_PROFILES = {
-    "DORADO": {
+    "DORADO_OTHER": {
         "LPC": {
             "step": 1, "header_rows": [29, 30, 31], "start_col": 2,
             "copy_rows": expand_ranges([(29, 34), 44]),
@@ -110,25 +110,68 @@ MODEL_PROFILES = {
             "copy_rows": expand_ranges([5, 6, 7, 9]),
             "spec_checks": [(7, 8), (9, 10)]
         },
+        "DHS": {
+            "step": 1, "header_rows": [51, 52, 53], "start_col": 4,
+            "copy_rows": expand_ranges([(51, 54), 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93]),
+            "spec_checks": [(r, r + 1) for r in [54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93]]
+        },
         "APA": {
             "step": 2, "header_rows": [38, 39, 40], "start_col": 4,
-            "copy_rows": expand_ranges([(38, 58), (62, 64), (66, 71), 75, 77, (79, 94), (98, 116), 118, (120, 129), 131]),
+            "copy_rows": expand_ranges([(38, 58), (62, 64), (66, 71), 75, (79, 94), (98, 116), 118, (120, 129), 131]),
             "spec_checks": [(58, 59), (62, 65), (63, 65), (64, 65), (71, 72), (94, 95), (118, 119)]
+        },
+        "GCMS": {
+            "step": 2, "header_rows": [40, 41, 42], "start_col": 4,
+            "copy_rows": expand_ranges([(40, 44), 49, 53]),
+            "spec_checks": [(43, 46), (53, 54)]
+        },
+        "GCMS RHC": {
+            "step": 2, "header_rows": [36, 37, 38, 39, 40], "start_col": 4,
+            "copy_rows": expand_ranges([(36, 41), 45, 49, (53, 55)]),
+            "spec_checks": [(41, 42), (45, 46), (49, 50)]
+        },
+        "Ghost Test": {
+            "step": 1, "header_rows": [4, 5, 6], "start_col": 2,
+            "copy_rows": expand_ranges([(4, 9)]),
+            "spec_checks": []
+        }
+    },
+
+    "DORADO_V4_V6": {
+        "LPC": {
+            "step": 1, "header_rows": [29, 30, 31], "start_col": 2,
+            "copy_rows": expand_ranges([(29, 34), 44]),
+            "spec_checks": [(32, 41), (33, 41), (34, 41)]
+        },
+        "IC": {
+            "step": 2, "header_rows": [19, 20], "start_col": 2,
+            "copy_rows": expand_ranges([(19, 28)]),
+            "spec_checks": [(28, 32)]
+        },
+        "FTIR": {
+            "step": 2, "header_rows": [5, 6], "start_col": 2,
+            "copy_rows": expand_ranges([5, 6, 7, 9]),
+            "spec_checks": [(7, 8), (9, 10)]
         },
         "DHS": {
             "step": 1, "header_rows": [51, 52, 53], "start_col": 4,
             "copy_rows": expand_ranges([(51, 54), 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93]),
             "spec_checks": [(r, r + 1) for r in [54, 57, 60, 63, 66, 69, 72, 75, 78, 81, 84, 87, 90, 93]]
         },
+        "APA": {
+            "step": 2, "header_rows": [38, 39, 40], "start_col": 4,
+            "copy_rows": expand_ranges([(38, 58), (64, 66), (68, 73), 79, 81, (83, 95), (101, 119), 121, (127, 135), 137]),
+            "spec_checks": [(58, 59), (64, 67), (65, 67), (66, 67), (73, 74), (95, 96), (121, 122)]
+        },
         "GCMS": {
             "step": 2, "header_rows": [40, 41, 42], "start_col": 4,
-            "copy_rows": expand_ranges([40, (43, 45), 49, 53]),
-            "spec_checks": [(r, r + 1) for r in [43, 44, 45, 49, 53]]
+            "copy_rows": expand_ranges([(40, 43), 47, 51]),
+            "spec_checks": [(43, 44), (47, 48), (51, 52)]
         },
         "GCMS RHC": {
             "step": 2, "header_rows": [36, 37, 38], "start_col": 4,
-            "copy_rows": expand_ranges([36, 37, (39, 41), 45, 49, (53, 55)]),
-            "spec_checks": [(41, 42), (45, 46), (49, 50)]
+            "copy_rows": expand_ranges([(36, 39), 45, 51, 57, (62, 63)]),
+            "spec_checks": [(39, 40), (45, 46), (51, 52), (57, 60)]
         },
         "Ghost Test": {
             "step": 1, "header_rows": [4, 5, 6], "start_col": 2,
@@ -320,8 +363,10 @@ def detect_model_profile(filename):
         return "MARLIN_OTHER", MODEL_PROFILES["MARLIN_OTHER"]
     elif "SUMMIT" in fn:
         return "SUMMIT", MODEL_PROFILES["SUMMIT"]
+    elif any(tag in fn for tag in ["GZ8431V4", "GZ8431V5", "GZ8431V6"]):
+        return "DORADO_V4_V6", MODEL_PROFILES["DORADO_V4_V6"]
     else:
-        return "DORADO", MODEL_PROFILES["DORADO"]
+        return "DORADO_OTHER", MODEL_PROFILES["DORADO_OTHER"]
 
 def find_sheet_in_wb(wb, target_name):
     for s in wb.sheetnames:
@@ -371,7 +416,6 @@ def to_float(val):
         return None
 
 def parse_spec_float(val):
-    """ดึงตัวเลข Spec แม้ในเซลล์จะมีสัญลักษณ์ เช่น <=50, < 0.08, 50 max"""
     f = to_float(val)
     if f is not None:
         return f
@@ -395,7 +439,6 @@ def find_spec_value(ws_target, ws_ref, spec_row, col):
         v = parse_spec_float(ws.cell(row=spec_row, column=col).value)
         if v is not None:
             return v
-    # วิ่งหาคอลัมน์ใกล้เคียงย้อนหลังก่อน แล้วค่อยหาคอลัมน์มาตรฐานด้านซ้าย (B..AZ)
     for ws in (ws_target, ws_ref):
         if ws is None:
             continue
@@ -419,7 +462,6 @@ def evaluate_entry_spec(ws_target, ws_ref, start_col, span, sheet_key, config):
             c = start_col + offset
             val_num = to_float(ws_target.cell(row=val_row, column=c).value)
 
-            # Fallback สำหรับ IC Total กรณีช่อง Total เป็นสูตรที่ยังไม่มีค่าแคช ให้บวกแถว Ion ด้านบนแทน
             if val_num is None and is_ic:
                 ion_vals = [to_float(ws_target.cell(row=r, column=c).value) for r in data_rows if r < val_row]
                 ion_vals = [v for v in ion_vals if v is not None]
@@ -561,7 +603,6 @@ def scan_all_valid_entries(ws_target, ws_ref, sheet_key, config, check_spec=Fals
     return entries
 
 def filter_new_raw_entries(cust_entries, raw_entries):
-    """ดึงเฉพาะข้อมูลใหม่ในไฟล์ดิบที่อยู่หลังตัวสุดท้ายของไฟล์ลูกค้า และไม่ดึงข้อมูลเก่าที่วันที่/WW น้อยกว่าตัวสุดท้ายของลูกค้า"""
     if not cust_entries:
         return raw_entries
     if not raw_entries:
@@ -586,18 +627,15 @@ def filter_new_raw_entries(cust_entries, raw_entries):
     else:
         candidates = []
 
-    # กรองซ้ำกันไม่ให้รายการที่วันที่เก่ากว่าตัวสุดท้ายของไฟล์ลูกค้าหลุดมาแสดง
     if last_c["date_val"] is not None:
         candidates = [r for r in candidates if r["date_val"] is None or r["date_val"] >= last_c["date_val"]]
 
     return candidates
 
 def matches_user_filter(entry, target_ww_num, target_date_val, filter_mode):
-    """เช็คว่ารายการนี้ตรงเงื่อนไข WW / วันที่ ที่ผู้ใช้เลือกหรือไม่"""
     if target_ww_num is None and target_date_val is None:
         return True
 
-    # ใช้ WW เป็นหลัก ถ้าชีทนั้นไม่มี WW ค่อยใช้วันที่
     if entry["ww_num"] is not None and target_ww_num is not None:
         if filter_mode == "gte":
             return entry["ww_num"] >= target_ww_num
@@ -1116,7 +1154,6 @@ if cust_zip_upload and raw_zip_upload:
     st.markdown("---")
     st.subheader(f"📋 จับคู่สำเร็จ {len(scanned_models)} โมเดล")
 
-    # ตารางแจ้งเตือนรวมด้านบนสุดทันทีถ้าพบคอลัมน์เก่าเกิน Spec ในไฟล์ลูกค้า
     if global_ng_rows:
         st.error(f"🚨 **ตรวจพบคอลัมน์เดิมในไฟล์ลูกค้าที่เกิน Spec ทั้งหมด {len(global_ng_rows)} คอลัมน์ (ระบบติ๊กเตรียมลบทิ้งทั้งคอลัมน์ให้อัตโนมัติแล้ว):**")
         st.dataframe(pd.DataFrame(global_ng_rows), use_container_width=True, hide_index=True)
@@ -1162,7 +1199,6 @@ if cust_zip_upload and raw_zip_upload:
                     next_dest_col = s_info["next_dest_col"]
                     available_to_select = s_info["available"]
 
-                    # ส่วนที่ 1: คอลัมน์เดิมที่เกิน Spec ในไฟล์ลูกค้า (ติ๊กเตรียมลบทิ้ง)
                     delete_selections = []
                     if cust_ng_entries:
                         st.error(f"🗑️ **พบคอลัมน์เดิมที่เกิน Spec จำนวน {len(cust_ng_entries)} คอลัมน์ (ติ๊กเพื่อลบทิ้งทั้งคอลัมน์และขยับชิด):**")
@@ -1176,7 +1212,6 @@ if cust_zip_upload and raw_zip_upload:
                                 delete_selections.append(ng_e)
                         st.markdown("---")
 
-                    # ส่วนที่ 2: ข้อมูลล่าสุดและรายการใหม่จากไฟล์ดิบ
                     if last_cust:
                         st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust['label']}` (คอลัมน์ถัดไปที่จะกรอก: **{get_column_letter(next_dest_col)}**)")
                     else:
