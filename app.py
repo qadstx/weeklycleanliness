@@ -2,6 +2,7 @@ import streamlit as st
 import openpyxl
 from openpyxl.utils import get_column_letter, column_index_from_string
 from lxml import etree
+import pandas as pd
 import io
 import datetime
 import re
@@ -10,7 +11,7 @@ import os
 import posixpath
 
 st.set_page_config(page_title="Customer Data Batch Auto-Filler", layout="wide")
-st.title("📦 ระบบเติมข้อมูลส่งลูกค้าอัตโนมัติ (เช็ค/ลบ NG เก่า + กรอง WW/วันที่ + รักษา Shape 100%)")
+st.title("📦 ระบบเติมข้อมูลส่งลูกค้าอัตโนมัติ (5 โปรไฟล์โมเดล + ลบ NG เก่า + กรอง WW/วันที่)")
 
 MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -90,7 +91,7 @@ def extract_date_val(val):
     return None
 
 # ==========================================
-# ตั้งค่าพิกัดแถวและ Spec แยกตาม 4 โปรไฟล์โมเดล
+# ตั้งค่าพิกัดแถวและ Spec แยกตาม 5 โปรไฟล์โมเดล
 # ==========================================
 MODEL_PROFILES = {
     "DORADO": {
@@ -101,7 +102,7 @@ MODEL_PROFILES = {
         },
         "IC": {
             "step": 2, "header_rows": [19, 20], "start_col": 2,
-            "copy_rows": expand_ranges([(19, 27)]),
+            "copy_rows": expand_ranges([(19, 28)]),
             "spec_checks": [(28, 32)]
         },
         "FTIR": {
@@ -143,7 +144,7 @@ MODEL_PROFILES = {
             "spec_checks": [(39, 46), (40, 46), (41, 46)]
         },
         "IC": {
-            "step": 2, "header_rows": [20, 21, 22, 23], "start_col": 2,
+            "step": 2, "header_rows": [20, 21, 22], "start_col": 2,
             "copy_rows": expand_ranges([(20, 31)]),
             "spec_checks": [(31, 35)]
         },
@@ -175,6 +176,49 @@ MODEL_PROFILES = {
         "Ghost Test": {
             "step": 1, "header_rows": [11, 12, 13, 14], "start_col": 2,
             "copy_rows": expand_ranges([(11, 17)]),
+            "spec_checks": []
+        }
+    },
+
+    "MARLIN_V0": {
+        "LPC": {
+            "step": 1, "header_rows": [34, 35, 36, 37, 38], "start_col": 2,
+            "copy_rows": expand_ranges([(34, 41), 51]),
+            "spec_checks": [(39, 48), (40, 48), (41, 48)]
+        },
+        "IC": {
+            "step": 2, "header_rows": [18, 19, 20, 21, 22], "start_col": 2,
+            "copy_rows": expand_ranges([(18, 30)]),
+            "spec_checks": [(30, 34)]
+        },
+        "FTIR": {
+            "step": 2, "header_rows": [3, 4, 5], "start_col": 2,
+            "copy_rows": expand_ranges([(3, 6), 8]),
+            "spec_checks": [(6, 7), (8, 9)]
+        },
+        "DHS": {
+            "step": 1, "header_rows": [52, 53, 54, 55], "start_col": 4,
+            "copy_rows": expand_ranges([(52, 56), 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92, 95]),
+            "spec_checks": [(r, r + 1) for r in [56, 59, 62, 65, 68, 71, 74, 77, 80, 83, 86, 89, 92, 95]]
+        },
+        "APA": {
+            "step": 2, "header_rows": [39, 40, 41, 42], "start_col": 4,
+            "copy_rows": expand_ranges([(39, 42), (44, 60), (66, 68), (70, 75), 81, 83, (85, 95), (101, 119), 121, (127, 135), 137]),
+            "spec_checks": [(60, 61), (75, 76), (95, 96), (121, 122)]
+        },
+        "GCMS": {
+            "step": 2, "header_rows": [41, 42, 43, 44], "start_col": 4,
+            "copy_rows": expand_ranges([(41, 45), 49, 53]),
+            "spec_checks": [(45, 46), (53, 54)]
+        },
+        "GCMS RHC": {
+            "step": 2, "header_rows": [37, 38, 39, 40], "start_col": 4,
+            "copy_rows": expand_ranges([(37, 41), 45, 49, (53, 55)]),
+            "spec_checks": [(41, 42), (45, 46), (49, 50)]
+        },
+        "Ghost Test": {
+            "step": 1, "header_rows": [10, 11, 12, 13], "start_col": 2,
+            "copy_rows": expand_ranges([(10, 17)]),
             "spec_checks": []
         }
     },
@@ -270,6 +314,8 @@ def detect_model_profile(filename):
     fn = filename.upper()
     if "GZ8427V4" in fn:
         return "MARLIN_V4", MODEL_PROFILES["MARLIN_V4"]
+    elif "GZ8427V0" in fn:
+        return "MARLIN_V0", MODEL_PROFILES["MARLIN_V0"]
     elif "MARLIN" in fn:
         return "MARLIN_OTHER", MODEL_PROFILES["MARLIN_OTHER"]
     elif "SUMMIT" in fn:
@@ -290,7 +336,7 @@ def normalize_filename(name):
     return re.sub(r'[\s_\-]+', '', s)
 
 # ==========================================
-# Helper Functions สำหรับอ่านและสแกนข้อมูล (ใช้ openpyxl อ่านอย่างเดียว)
+# Helper Functions สำหรับอ่านและสแกนข้อมูล
 # ==========================================
 def get_merge_bounds(ws, row, col):
     for m in ws.merged_cells.ranges:
@@ -321,29 +367,65 @@ def to_float(val):
         return None
     try:
         return float(s)
-    except:
+    except ValueError:
         return None
+
+def parse_spec_float(val):
+    """ดึงตัวเลข Spec แม้ในเซลล์จะมีสัญลักษณ์ เช่น <=50, < 0.08, 50 max"""
+    f = to_float(val)
+    if f is not None:
+        return f
+    if val is None:
+        return None
+    s = str(val).strip().replace(",", "")
+    if s.upper() in ["NA", "N/A", "ND", "-", ""]:
+        return None
+    m = re.search(r'(\d+(?:\.\d+)?)', s)
+    if m:
+        try:
+            return float(m.group(1))
+        except ValueError:
+            return None
+    return None
 
 def find_spec_value(ws_target, ws_ref, spec_row, col):
     for ws in (ws_target, ws_ref):
-        v = to_float(ws.cell(row=spec_row, column=col).value) if ws else None
+        if ws is None:
+            continue
+        v = parse_spec_float(ws.cell(row=spec_row, column=col).value)
         if v is not None:
             return v
-    for ws in (ws_ref, ws_target):
-        if not ws:
+    # วิ่งหาคอลัมน์ใกล้เคียงย้อนหลังก่อน แล้วค่อยหาคอลัมน์มาตรฐานด้านซ้าย (B..AZ)
+    for ws in (ws_target, ws_ref):
+        if ws is None:
             continue
+        for c in range(max(2, col - 1), max(1, col - 15), -1):
+            v = parse_spec_float(ws.cell(row=spec_row, column=c).value)
+            if v is not None:
+                return v
         for c in range(2, min(ws.max_column + 1, 60)):
-            v = to_float(ws.cell(row=spec_row, column=c).value)
+            v = parse_spec_float(ws.cell(row=spec_row, column=c).value)
             if v is not None:
                 return v
     return None
 
-def evaluate_entry_spec(ws_target, ws_ref, start_col, span, config):
+def evaluate_entry_spec(ws_target, ws_ref, start_col, span, sheet_key, config):
     failures = []
+    is_ic = (sheet_key.strip().lower() == "ic")
+    data_rows = get_data_rows(config)
+
     for val_row, spec_row in config.get("spec_checks", []):
         for offset in range(span):
             c = start_col + offset
             val_num = to_float(ws_target.cell(row=val_row, column=c).value)
+
+            # Fallback สำหรับ IC Total กรณีช่อง Total เป็นสูตรที่ยังไม่มีค่าแคช ให้บวกแถว Ion ด้านบนแทน
+            if val_num is None and is_ic:
+                ion_vals = [to_float(ws_target.cell(row=r, column=c).value) for r in data_rows if r < val_row]
+                ion_vals = [v for v in ion_vals if v is not None]
+                if ion_vals:
+                    val_num = sum(ion_vals)
+
             if val_num is None:
                 continue
             spec_num = find_spec_value(ws_target, ws_ref, spec_row, c)
@@ -399,7 +481,7 @@ def determine_entry_span(ws, col, config):
             return 1
     return default_step
 
-def scan_all_valid_entries(ws_target, ws_ref, config, check_spec=False):
+def scan_all_valid_entries(ws_target, ws_ref, sheet_key, config, check_spec=False):
     entries = []
     header_rows = config["header_rows"]
     data_rows = get_data_rows(config)
@@ -420,7 +502,6 @@ def scan_all_valid_entries(ws_target, ws_ref, config, check_spec=False):
         unique_id = None
         tokens = []
 
-        # สแกนหา WW และวันที่เฉพาะในแถวหัวตาราง (header_rows) เท่านั้น ไม่ล้ำลงไปอ่านแถวตัวเลขผลเทส
         for r in header_rows:
             if r < 1:
                 continue
@@ -453,7 +534,7 @@ def scan_all_valid_entries(ws_target, ws_ref, config, check_spec=False):
         data_sig = "|".join(data_vals)
 
         full_sig = " | ".join(tokens) if tokens else f"Col {get_column_letter(col)}"
-        failures = evaluate_entry_spec(ws_target, ws_ref, col, span, config) if check_spec else []
+        failures = evaluate_entry_spec(ws_target, ws_ref, col, span, sheet_key, config) if check_spec else []
 
         date_str = col_date.strftime("%d-%b-%y") if col_date else "ไม่ระบุวันที่"
         ww_str = f"WW{col_ww:02d} | " if col_ww is not None else ""
@@ -464,6 +545,7 @@ def scan_all_valid_entries(ws_target, ws_ref, config, check_spec=False):
             "col": col,
             "span": span,
             "end_col": col + span - 1,
+            "col_range_str": col_range_str,
             "unique_id": unique_id,
             "tokens": tokens,
             "full_sig": full_sig,
@@ -479,6 +561,7 @@ def scan_all_valid_entries(ws_target, ws_ref, config, check_spec=False):
     return entries
 
 def filter_new_raw_entries(cust_entries, raw_entries):
+    """ดึงเฉพาะข้อมูลใหม่ในไฟล์ดิบที่อยู่หลังตัวสุดท้ายของไฟล์ลูกค้า และไม่ดึงข้อมูลเก่าที่วันที่/WW น้อยกว่าตัวสุดท้ายของลูกค้า"""
     if not cust_entries:
         return raw_entries
     if not raw_entries:
@@ -493,17 +576,40 @@ def filter_new_raw_entries(cust_entries, raw_entries):
             match_indices.append(i)
 
     if match_indices:
-        return raw_entries[match_indices[-1] + 1:]
+        candidates = raw_entries[match_indices[-1] + 1:]
+    elif last_c["date_val"] is not None:
+        candidates = [r for r in raw_entries if r["date_val"] is not None and r["date_val"] > last_c["date_val"]]
+    elif last_c["ww_num"] is not None:
+        candidates = [r for r in raw_entries if r["ww_num"] is not None and r["ww_num"] > last_c["ww_num"]]
+    elif len(raw_entries) > len(cust_entries):
+        candidates = raw_entries[len(cust_entries):]
+    else:
+        candidates = []
 
+    # กรองซ้ำกันไม่ให้รายการที่วันที่เก่ากว่าตัวสุดท้ายของไฟล์ลูกค้าหลุดมาแสดง
     if last_c["date_val"] is not None:
-        newer_by_date = [r for r in raw_entries if r["date_val"] is not None and r["date_val"] > last_c["date_val"]]
-        if newer_by_date:
-            return newer_by_date
+        candidates = [r for r in candidates if r["date_val"] is None or r["date_val"] >= last_c["date_val"]]
 
-    if len(raw_entries) > len(cust_entries):
-        return raw_entries[len(cust_entries):]
+    return candidates
 
-    return []
+def matches_user_filter(entry, target_ww_num, target_date_val, filter_mode):
+    """เช็คว่ารายการนี้ตรงเงื่อนไข WW / วันที่ ที่ผู้ใช้เลือกหรือไม่"""
+    if target_ww_num is None and target_date_val is None:
+        return True
+
+    # ใช้ WW เป็นหลัก ถ้าชีทนั้นไม่มี WW ค่อยใช้วันที่
+    if entry["ww_num"] is not None and target_ww_num is not None:
+        if filter_mode == "gte":
+            return entry["ww_num"] >= target_ww_num
+        else:
+            return entry["ww_num"] <= target_ww_num
+    elif entry["date_val"] is not None and target_date_val is not None:
+        if filter_mode == "gte":
+            return entry["date_val"] >= target_date_val
+        else:
+            return entry["date_val"] <= target_date_val
+
+    return True
 
 # ==========================================
 # ระบบ XML Patching (ลบคอลัมน์ NG แบบขยับชิด + เติมข้อมูลใหม่ รักษา Shape/กราฟ 100%)
@@ -653,11 +759,6 @@ def get_or_create_merge_cells(root):
     return mc
 
 def patch_sheet_xml(sheet_xml_bytes, sheet_key, ws_cust_src, ws_raw_src, sheet_data_plan, protect_formulas=True):
-    """
-    จัดการทั้ง:
-    1) ลบคอลัมน์เก่าที่หลุด Spec (ขยับคอลัมน์ด้านขวาที่ผ่าน Spec มาชิดแทนที่ และล้างคอลัมน์ส่วนเกินด้านท้าย)
-    2) เติมคอลัมน์ใหม่จากไฟล์ดิบต่อท้ายทันที
-    """
     all_cust_entries = sheet_data_plan.get("all_cust_entries", [])
     delete_entries = sheet_data_plan.get("delete_entries", [])
     new_entries = sheet_data_plan.get("entries", [])
@@ -677,18 +778,15 @@ def patch_sheet_xml(sheet_xml_bytes, sheet_key, ws_cust_src, ws_raw_src, sheet_d
     is_lpc_sheet = (sheet_key.strip().lower() == "lpc")
     mold_row = max(copy_rows) if is_lpc_sheet else -1
 
-    # สร้างคิวรายการที่จะเขียนลงชีท: (source_ws, entry_dict)
     write_queue = []
     if delete_entries:
         first_del_col = min(e["col"] for e in delete_entries)
         old_end_col = max(e["end_col"] for e in all_cust_entries)
         del_col_set = {e["col"] for e in delete_entries}
 
-        # นำคอลัมน์เดิมของลูกค้าที่อยู่หลังจุดลบ (และไม่ถูกลบ) มาขยับชิดซ้าย
         for c_ent in all_cust_entries:
             if c_ent["col"] > first_del_col and c_ent["col"] not in del_col_set:
                 write_queue.append((ws_cust_src, c_ent))
-        # ต่อท้ายด้วยข้อมูลใหม่จากไฟล์ดิบ
         for r_ent in new_entries:
             write_queue.append((ws_raw_src, r_ent))
 
@@ -704,7 +802,6 @@ def patch_sheet_xml(sheet_xml_bytes, sheet_key, ws_cust_src, ws_raw_src, sheet_d
     merges_to_add = []
     merges_to_clear = []
 
-    # 1. เขียนรายการทั้งหมดในคิว (ทั้งที่ขยับชิดซ้ายและที่เติมใหม่)
     for src_ws, entry in write_queue:
         src_col = entry["col"]
         span = entry.get("span", config["step"])
@@ -741,7 +838,6 @@ def patch_sheet_xml(sheet_xml_bytes, sheet_key, ws_cust_src, ws_raw_src, sheet_d
 
         curr_dst_col += span
 
-    # 2. หากลบคอลัมน์ออกแล้วพื้นที่ท้ายตารางหดสั้นลง ให้ล้างค่าคอลัมน์ส่วนเกินด้านท้ายทิ้งทั้งหมด
     while curr_dst_col <= clear_up_to_col:
         modified_cols.add(curr_dst_col)
         for r in copy_rows:
@@ -759,7 +855,6 @@ def patch_sheet_xml(sheet_xml_bytes, sheet_key, ws_cust_src, ws_raw_src, sheet_d
             )
         curr_dst_col += 1
 
-    # 3. เคลียร์ค่าแคชเก่าในช่องที่มีสูตรของทุกคอลัมน์ที่เปลี่ยนแปลง เพื่อให้ Excel คำนวณใหม่ทันทีตอนเปิด
     for row_el in sheet_data:
         for c_el in row_el:
             c_ref = c_el.get("r")
@@ -773,7 +868,6 @@ def patch_sheet_xml(sheet_xml_bytes, sheet_key, ws_cust_src, ws_raw_src, sheet_d
                 if c_el.get("t") == "e":
                     c_el.attrib.pop("t", None)
 
-    # 4. อัปเดต Merge Cells
     if merges_to_clear or merges_to_add:
         mc = root.find(f"{{{MAIN_NS}}}mergeCells")
         if mc is not None:
@@ -888,14 +982,23 @@ def load_uploaded_files(upload_input):
 # ==========================================
 st.markdown("### 1️⃣ ตั้งค่าจุดตัดข้อมูล (WW / วันที่) และอัปโหลดไฟล์")
 
-col_cfg1, col_cfg2, col_up1, col_up2 = st.columns([1, 1, 1.3, 1.3])
+col_cfg1, col_cfg2, col_up1, col_up2 = st.columns([1.1, 1.1, 1.2, 1.2])
 
 with col_cfg1:
-    user_ww_input = st.text_input("🎯 WW ที่ต้องการส่งถึง", placeholder="เช่น 17 หรือ WW17 (ว่าง=ไม่จำกัด)")
-    protect_formulas = st.checkbox("🛡️ ป้องกันเขียนทับสูตร", value=True)
+    user_ww_input = st.text_input("🎯 WW ที่ต้องการ", placeholder="เช่น 17 หรือ WW17 (ว่าง=ทั้งหมด)")
+    filter_mode_label = st.selectbox(
+        "🔍 โหมดการแสดงรายการให้เลือก",
+        options=[
+            "แสดงเฉพาะ <= WW/วันที่ที่เลือก (ซ่อนตัวที่เกิน)",
+            "แสดงเฉพาะ >= WW/วันที่ที่เลือก (ซ่อนตัวที่ก่อนหน้า)",
+            "แสดงทั้งหมด (ติ๊กเฉพาะ <= WW/วันที่ที่เลือก)"
+        ],
+        index=0
+    )
 
 with col_cfg2:
-    user_date_input = st.date_input("📅 วันที่ต้องการส่งถึง (กรณีชีทไม่มี WW)", value=None)
+    user_date_input = st.date_input("📅 วันที่ที่ต้องการ (กรณีชีทไม่มี WW)", value=None)
+    protect_formulas = st.checkbox("🛡️ ป้องกันเขียนทับสูตร", value=True)
 
 with col_up1:
     cust_zip_upload = st.file_uploader(
@@ -917,6 +1020,16 @@ if user_ww_input.strip():
     if match:
         target_ww_num = int(match.group())
 target_date_val = user_date_input
+
+if filter_mode_label.startswith("แสดงเฉพาะ <="):
+    filter_mode = "lte"
+    hide_out_of_range = True
+elif filter_mode_label.startswith("แสดงเฉพาะ >="):
+    filter_mode = "gte"
+    hide_out_of_range = True
+else:
+    filter_mode = "lte"
+    hide_out_of_range = False
 
 if cust_zip_upload and raw_zip_upload:
     with st.spinner("กำลังสแกนไฟล์ ตรวจสอบ Spec ข้อมูลเดิม และจับคู่โมเดล..."):
@@ -945,9 +1058,8 @@ if cust_zip_upload and raw_zip_upload:
             st.error("❌ ไม่พบไฟล์ที่ชื่อตรงกันระหว่างไฟล์ลูกค้าและไฟล์ดิบ")
             st.stop()
 
-        # Pre-scan ทุกโมเดลเพื่อสรุปแจ้งเตือนข้อมูลเดิมที่หลุด Spec ไว้ด้านบนสุดก่อน
         scanned_models = []
-        global_ng_alerts = []
+        global_ng_rows = []
 
         for c_name, r_name in paired_models:
             profile_name, model_cfg = detect_model_profile(c_name)
@@ -964,14 +1076,20 @@ if cust_zip_upload and raw_zip_upload:
                     sheets_info[sheet_key] = None
                     continue
 
-                # ตรวจสอบ Spec ของข้อมูลเดิมในไฟล์ลูกค้าด้วย (check_spec=True)
-                cust_entries = scan_all_valid_entries(ws_c, ws_c, config, check_spec=True)
-                raw_entries = scan_all_valid_entries(ws_r, ws_c, config, check_spec=True)
+                cust_entries = scan_all_valid_entries(ws_c, ws_c, sheet_key, config, check_spec=True)
+                raw_entries = scan_all_valid_entries(ws_r, ws_c, sheet_key, config, check_spec=True)
 
                 cust_ng_entries = [e for e in cust_entries if e["is_ng"]]
                 model_ng_count += len(cust_ng_entries)
                 for ng_e in cust_ng_entries:
-                    global_ng_alerts.append(f"**{c_name}** | ชีท **{sheet_key}** | {ng_e['label']}")
+                    global_ng_rows.append({
+                        "โมเดล": c_name,
+                        "ชีท": sheet_key,
+                        "คอลัมน์": ng_e["col_range_str"],
+                        "WW / วันที่": f"WW{ng_e['ww_num']:02d}" if ng_e["ww_num"] is not None else (ng_e["date_val"].strftime("%d-%b-%y") if ng_e["date_val"] else "-"),
+                        "หัวตาราง": ng_e["full_sig"],
+                        "จุดที่เกิน Spec": ", ".join(ng_e["failures"])
+                    })
 
                 last_cust = cust_entries[-1] if cust_entries else None
                 next_dest_col = last_cust["end_col"] + 1 if last_cust else config["start_col"]
@@ -998,12 +1116,12 @@ if cust_zip_upload and raw_zip_upload:
     st.markdown("---")
     st.subheader(f"📋 จับคู่สำเร็จ {len(scanned_models)} โมเดล")
 
-    # แจ้งเตือนรวมด้านบนสุดทันทีถ้าพบข้อมูลเดิมในไฟล์ลูกค้าเกิน Spec
-    if global_ng_alerts:
-        alert_text = f"🚨 **ตรวจพบข้อมูลเดิมในไฟล์ลูกค้าที่เกิน Spec ทั้งหมด {len(global_ng_alerts)} คอลัมน์ (ระบบติ๊กเตรียมลบทิ้งทั้งคอลัมน์ให้อัตโนมัติแล้ว):**\n\n" + "\n".join(f"- {msg}" for msg in global_ng_alerts)
-        st.error(alert_text)
+    # ตารางแจ้งเตือนรวมด้านบนสุดทันทีถ้าพบคอลัมน์เก่าเกิน Spec ในไฟล์ลูกค้า
+    if global_ng_rows:
+        st.error(f"🚨 **ตรวจพบคอลัมน์เดิมในไฟล์ลูกค้าที่เกิน Spec ทั้งหมด {len(global_ng_rows)} คอลัมน์ (ระบบติ๊กเตรียมลบทิ้งทั้งคอลัมน์ให้อัตโนมัติแล้ว):**")
+        st.dataframe(pd.DataFrame(global_ng_rows), use_container_width=True, hide_index=True)
     else:
-        st.success("✅ ตรวจสอบข้อมูลเดิมในไฟล์ลูกค้าทุกโมเดลแล้ว ไม่พบคอลัมน์ที่เกิน Spec")
+        st.success("✅ ตรวจสอบคอลัมน์เดิมในไฟล์ลูกค้าทุกโมเดลแล้ว ไม่พบคอลัมน์ที่เกิน Spec")
 
     all_models_data = {}
 
@@ -1020,7 +1138,15 @@ if cust_zip_upload and raw_zip_upload:
         with st.expander(pair_title, expanded=(file_idx == 0 or m_data["model_ng_count"] > 0)):
             model_selections = {}
             sheet_names_list = list(model_cfg.keys())
-            tabs = st.tabs(sheet_names_list)
+            tab_labels = []
+            for sk in sheet_names_list:
+                si = sheets_info.get(sk)
+                if si and len(si["cust_ng_entries"]) > 0:
+                    tab_labels.append(f"{sk} (🚨{len(si['cust_ng_entries'])})")
+                else:
+                    tab_labels.append(sk)
+
+            tabs = st.tabs(tab_labels)
 
             for idx, sheet_key in enumerate(sheet_names_list):
                 s_info = sheets_info.get(sheet_key)
@@ -1036,10 +1162,10 @@ if cust_zip_upload and raw_zip_upload:
                     next_dest_col = s_info["next_dest_col"]
                     available_to_select = s_info["available"]
 
-                    # ส่วนที่ 1: แสดงและให้ยืนยันการลบคอลัมน์เดิมที่เกิน Spec ในไฟล์ลูกค้า
+                    # ส่วนที่ 1: คอลัมน์เดิมที่เกิน Spec ในไฟล์ลูกค้า (ติ๊กเตรียมลบทิ้ง)
                     delete_selections = []
                     if cust_ng_entries:
-                        st.error(f"🗑️ **พบข้อมูลเดิมที่เคยส่งไปแล้วแต่เกิน Spec จำนวน {len(cust_ng_entries)} คอลัมน์ (ติ๊กเพื่อลบทิ้งทั้งคอลัมน์และขยับชิด):**")
+                        st.error(f"🗑️ **พบคอลัมน์เดิมที่เกิน Spec จำนวน {len(cust_ng_entries)} คอลัมน์ (ติ๊กเพื่อลบทิ้งทั้งคอลัมน์และขยับชิด):**")
                         for ng_e in cust_ng_entries:
                             del_chk = st.checkbox(
                                 f"ลบทิ้ง: {ng_e['label']}",
@@ -1050,7 +1176,7 @@ if cust_zip_upload and raw_zip_upload:
                                 delete_selections.append(ng_e)
                         st.markdown("---")
 
-                    # ส่วนที่ 2: แสดงข้อมูลล่าสุดและรายการใหม่จากไฟล์ดิบ
+                    # ส่วนที่ 2: ข้อมูลล่าสุดและรายการใหม่จากไฟล์ดิบ
                     if last_cust:
                         st.info(f"📌 **ข้อมูลล่าสุดในไฟล์ลูกค้า:** `{last_cust['label']}` (คอลัมน์ถัดไปที่จะกรอก: **{get_column_letter(next_dest_col)}**)")
                     else:
@@ -1060,22 +1186,30 @@ if cust_zip_upload and raw_zip_upload:
                     if not available_to_select:
                         st.success("✅ ไม่มีข้อมูลใหม่เพิ่มเติมในไฟล์ดิบ")
                     else:
+                        shown_entries = []
+                        hidden_count = 0
                         for entry in available_to_select:
-                            within_cutoff = True
-                            if entry["ww_num"] is not None and target_ww_num is not None:
-                                within_cutoff = (entry["ww_num"] <= target_ww_num)
-                            elif entry["date_val"] is not None and target_date_val is not None:
-                                within_cutoff = (entry["date_val"] <= target_date_val)
+                            in_range = matches_user_filter(entry, target_ww_num, target_date_val, filter_mode)
+                            if hide_out_of_range and not in_range:
+                                hidden_count += 1
+                                continue
+                            shown_entries.append((entry, in_range))
 
-                            default_checked = (not entry["is_ng"]) and within_cutoff
+                        if hidden_count > 0:
+                            st.caption(f"🙈 ซ่อนรายการที่อยู่นอกเงื่อนไข WW/วันที่ ไปแล้ว {hidden_count} รายการ")
 
-                            checked = st.checkbox(
-                                entry["label"],
-                                value=default_checked,
-                                key=f"chk_{c_name}_{sheet_key}_{entry['col']}_{target_ww_num}_{target_date_val}"
-                            )
-                            if checked:
-                                sheet_selections.append(entry)
+                        if not shown_entries:
+                            st.info("ไม่มีรายการใหม่ที่ตรงกับเงื่อนไข WW / วันที่ ที่เลือก")
+                        else:
+                            for entry, in_range in shown_entries:
+                                default_checked = (not entry["is_ng"]) and in_range
+                                checked = st.checkbox(
+                                    entry["label"],
+                                    value=default_checked,
+                                    key=f"chk_{c_name}_{sheet_key}_{entry['col']}_{target_ww_num}_{target_date_val}_{filter_mode}"
+                                )
+                                if checked:
+                                    sheet_selections.append(entry)
 
                     model_selections[sheet_key] = {
                         "all_cust_entries": cust_entries,
