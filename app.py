@@ -171,7 +171,7 @@ MODEL_PROFILES = {
         "GCMS RHC": {
             "step": 2, "header_rows": [36, 37, 38], "start_col": 4,
             "copy_rows": expand_ranges([(36, 39), 45, 51, 57, (62, 63)]),
-            "spec_checks": [(39, 40), (45, 46), (51, 52), (57, 60)]
+            "spec_checks": [(39, 40), (45, 46), (51, 52)]
         },
         "Ghost Test": {
             "step": 1, "header_rows": [4, 5, 6], "start_col": 2,
