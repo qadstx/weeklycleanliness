@@ -91,7 +91,7 @@ def extract_date_val(val):
     return None
 
 # ==========================================
-# ตั้งค่าพิกัดแถวและ Spec แยกตาม 6 โปรไฟล์โมเดล
+# ตั้งค่าพิกัดแถวและ Spec แยกตาม 6 โปรไฟล์โมเดล (อัปเดตตามไฟล์ v3)
 # ==========================================
 MODEL_PROFILES = {
     "DORADO_OTHER": {
@@ -564,6 +564,11 @@ def scan_all_valid_entries(ws_target, ws_ref, sheet_key, config, check_spec=Fals
                         if s_val and s_val not in tokens:
                             tokens.append(s_val)
 
+        # ป้องกันคอลัมน์เปล่าที่ไม่มีหัวตารางใดๆ (เช่น Col I, Col J, Col K ที่เผลอมีเลข 0 ค้าง) หลุดเข้ามาเป็นรายการ
+        if not tokens and col_ww is None and col_date is None and unique_id is None:
+            col += 1
+            continue
+
         data_vals = []
         for r in data_rows:
             for offset in range(span):
@@ -603,6 +608,7 @@ def scan_all_valid_entries(ws_target, ws_ref, sheet_key, config, check_spec=Fals
     return entries
 
 def filter_new_raw_entries(cust_entries, raw_entries):
+    """ดึงเฉพาะข้อมูลใหม่ในไฟล์ดิบที่อยู่หลังตัวล่าสุดของไฟล์ลูกค้า ไปจนถึงตัวล่าสุดในไฟล์ดิบ"""
     if not cust_entries:
         return raw_entries
     if not raw_entries:
@@ -632,22 +638,27 @@ def filter_new_raw_entries(cust_entries, raw_entries):
 
     return candidates
 
-def matches_user_filter(entry, target_ww_num, target_date_val, filter_mode):
+def should_auto_check(entry, target_ww_num, target_date_val):
+    """
+    ติ๊กเลือกอัตโนมัติเฉพาะรายการที่:
+    1. ไม่หลุด Spec (is_ng == False)
+    2. ถ้าชีทนั้นมี WW และผู้ใช้กรอก WW -> ติ๊กเฉพาะ <= WW ที่เลือก
+    3. ถ้าชีทนั้นไม่มี WW และผู้ใช้เลือกวันที่ -> ติ๊กเฉพาะ <= วันที่ที่เลือก
+    4. ถ้าไม่ได้กรอกทั้ง WW และวันที่ -> ติ๊กทั้งหมดที่ผ่าน Spec
+    """
+    if entry["is_ng"]:
+        return False
     if target_ww_num is None and target_date_val is None:
         return True
 
     if entry["ww_num"] is not None and target_ww_num is not None:
-        if filter_mode == "gte":
-            return entry["ww_num"] >= target_ww_num
-        else:
-            return entry["ww_num"] <= target_ww_num
-    elif entry["date_val"] is not None and target_date_val is not None:
-        if filter_mode == "gte":
-            return entry["date_val"] >= target_date_val
-        else:
-            return entry["date_val"] <= target_date_val
+        return entry["ww_num"] <= target_ww_num
+    if entry["ww_num"] is None and entry["date_val"] is not None and target_date_val is not None:
+        return entry["date_val"] <= target_date_val
+    if target_ww_num is None and entry["date_val"] is not None and target_date_val is not None:
+        return entry["date_val"] <= target_date_val
 
-    return True
+    return False
 
 # ==========================================
 # ระบบ XML Patching (ลบคอลัมน์ NG แบบขยับชิด + เติมข้อมูลใหม่ รักษา Shape/กราฟ 100%)
@@ -1018,25 +1029,16 @@ def load_uploaded_files(upload_input):
 # ==========================================
 # ส่วนแสดงผลหน้าเว็บ (Main UI)
 # ==========================================
-st.markdown("### 1️⃣ ตั้งค่าจุดตัดข้อมูล (WW / วันที่) และอัปโหลดไฟล์")
+st.markdown("### 1️⃣ ตั้งค่าจุดตัดการติ๊กเลือก (WW / วันที่) และอัปโหลดไฟล์")
 
-col_cfg1, col_cfg2, col_up1, col_up2 = st.columns([1.1, 1.1, 1.2, 1.2])
+col_cfg1, col_cfg2, col_up1, col_up2 = st.columns([1.0, 1.1, 1.25, 1.25])
 
 with col_cfg1:
-    user_ww_input = st.text_input("🎯 WW ที่ต้องการ", placeholder="เช่น 17 หรือ WW17 (ว่าง=ทั้งหมด)")
-    filter_mode_label = st.selectbox(
-        "🔍 โหมดการแสดงรายการให้เลือก",
-        options=[
-            "แสดงเฉพาะ <= WW/วันที่ที่เลือก (ซ่อนตัวที่เกิน)",
-            "แสดงเฉพาะ >= WW/วันที่ที่เลือก (ซ่อนตัวที่ก่อนหน้า)",
-            "แสดงทั้งหมด (ติ๊กเฉพาะ <= WW/วันที่ที่เลือก)"
-        ],
-        index=0
-    )
+    user_ww_input = st.text_input("🎯 ติ๊กเลือกถึง WW", placeholder="เช่น 17 หรือ WW17 (ว่าง=ทั้งหมด)")
+    protect_formulas = st.checkbox("🛡️ ป้องกันเขียนทับสูตร", value=True)
 
 with col_cfg2:
-    user_date_input = st.date_input("📅 วันที่ที่ต้องการ (กรณีชีทไม่มี WW)", value=None)
-    protect_formulas = st.checkbox("🛡️ ป้องกันเขียนทับสูตร", value=True)
+    user_date_input = st.date_input("📅 ติ๊กเลือกถึงวันที่ (ใช้เมื่อชีทไม่ระบุ WW)", value=None)
 
 with col_up1:
     cust_zip_upload = st.file_uploader(
@@ -1058,16 +1060,6 @@ if user_ww_input.strip():
     if match:
         target_ww_num = int(match.group())
 target_date_val = user_date_input
-
-if filter_mode_label.startswith("แสดงเฉพาะ <="):
-    filter_mode = "lte"
-    hide_out_of_range = True
-elif filter_mode_label.startswith("แสดงเฉพาะ >="):
-    filter_mode = "gte"
-    hide_out_of_range = True
-else:
-    filter_mode = "lte"
-    hide_out_of_range = False
 
 if cust_zip_upload and raw_zip_upload:
     with st.spinner("กำลังสแกนไฟล์ ตรวจสอบ Spec ข้อมูลเดิม และจับคู่โมเดล..."):
@@ -1221,30 +1213,15 @@ if cust_zip_upload and raw_zip_upload:
                     if not available_to_select:
                         st.success("✅ ไม่มีข้อมูลใหม่เพิ่มเติมในไฟล์ดิบ")
                     else:
-                        shown_entries = []
-                        hidden_count = 0
                         for entry in available_to_select:
-                            in_range = matches_user_filter(entry, target_ww_num, target_date_val, filter_mode)
-                            if hide_out_of_range and not in_range:
-                                hidden_count += 1
-                                continue
-                            shown_entries.append((entry, in_range))
-
-                        if hidden_count > 0:
-                            st.caption(f"🙈 ซ่อนรายการที่อยู่นอกเงื่อนไข WW/วันที่ ไปแล้ว {hidden_count} รายการ")
-
-                        if not shown_entries:
-                            st.info("ไม่มีรายการใหม่ที่ตรงกับเงื่อนไข WW / วันที่ ที่เลือก")
-                        else:
-                            for entry, in_range in shown_entries:
-                                default_checked = (not entry["is_ng"]) and in_range
-                                checked = st.checkbox(
-                                    entry["label"],
-                                    value=default_checked,
-                                    key=f"chk_{c_name}_{sheet_key}_{entry['col']}_{target_ww_num}_{target_date_val}_{filter_mode}"
-                                )
-                                if checked:
-                                    sheet_selections.append(entry)
+                            default_checked = should_auto_check(entry, target_ww_num, target_date_val)
+                            checked = st.checkbox(
+                                entry["label"],
+                                value=default_checked,
+                                key=f"chk_{c_name}_{sheet_key}_{entry['col']}_{target_ww_num}_{target_date_val}"
+                            )
+                            if checked:
+                                sheet_selections.append(entry)
 
                     model_selections[sheet_key] = {
                         "all_cust_entries": cust_entries,
